@@ -20,9 +20,7 @@ app.use(morgan('dev'));
 app.use('/api', meetingRoutes);
 
 // Health check endpoint
-app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'OK', timestamp: new Date().toISOString() });
-});
+
 
 // Start server
 app.listen(PORT, () => {
