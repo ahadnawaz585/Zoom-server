@@ -33,21 +33,35 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
   const signature = generateSignature(meetingId, 0, duration);
 
   const browserTypes: ('chromium' | 'firefox')[] = ['chromium', 'firefox'];
-  const MIN_BOTS_PER_BROWSER = 2; // Reduced for testing
+  
+  // Ensure even distribution of bots by adjusting this algorithm
   const totalBots = bots.length;
-  const botsPerBrowser = Math.max(MIN_BOTS_PER_BROWSER, Math.floor(totalBots / browserTypes.length));
-  const botPairsByBrowser: { [key: string]: Bot[][] } = { chromium: [], firefox: [] };
-
   const shuffledBots = [...bots].sort(() => Math.random() - 0.5);
-  let botIndex = 0;
-  for (const browser of browserTypes) {
-    const botsForThisBrowser = shuffledBots.slice(botIndex, botIndex + botsPerBrowser);
-    botIndex += botsPerBrowser;
-    for (let i = 0; i < botsForThisBrowser.length; i += 2) {
-      botPairsByBrowser[browser].push(botsForThisBrowser.slice(i, i + 2));
+  
+  // First, calculate how many bots per browser type
+  const botsPerBrowserType = Math.ceil(totalBots / browserTypes.length);
+  
+  // Initialize bot distribution structure
+  const botPairsByBrowser: { [key: string]: Bot[][] } = { 
+    chromium: [], 
+    firefox: [] 
+  };
+  
+  // Distribute bots evenly across browser types
+  for (let i = 0; i < browserTypes.length; i++) {
+    const browser = browserTypes[i];
+    const startIdx = i * botsPerBrowserType;
+    const endIdx = Math.min(startIdx + botsPerBrowserType, totalBots);
+    const botsForThisBrowser = shuffledBots.slice(startIdx, endIdx);
+    
+    // Group bots into pairs (or single bot if odd number)
+    for (let j = 0; j < botsForThisBrowser.length; j += 2) {
+      const pair = botsForThisBrowser.slice(j, Math.min(j + 2, botsForThisBrowser.length));
+      botPairsByBrowser[browser].push(pair);
     }
   }
 
+  // Create tasks from the distributed bots
   const tasks: Task[] = [];
   for (const browser of browserTypes) {
     botPairsByBrowser[browser].forEach(botPair => {
@@ -62,9 +76,13 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
     });
   }
 
+  // Log bot distribution
+  const chromiumBots = botPairsByBrowser.chromium.flat().length;
+  const firefoxBots = botPairsByBrowser.firefox.flat().length;
   console.log(`[${new Date().toISOString()}] Created ${tasks.length} bot pairs: ` +
-    `Chromium: ${botPairsByBrowser.chromium.length} (${botPairsByBrowser.chromium.flat().length} bots), ` +
-    `Firefox: ${botPairsByBrowser.firefox.length} (${botPairsByBrowser.firefox.flat().length} bots)`);
+    `Chromium: ${botPairsByBrowser.chromium.length} (${chromiumBots} bots), ` +
+    `Firefox: ${botPairsByBrowser.firefox.length} (${firefoxBots} bots)`);
+  console.log(`[${new Date().toISOString()}] Total bots distributed: ${chromiumBots + firefoxBots} out of ${totalBots}`);
 
   console.log(`[${new Date().toISOString()}] Starting execution of ${tasks.length} tasks`);
 
@@ -121,6 +139,7 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
         }
       });
 
+      // Increased timeout to 2 minutes to give more time for slow connections
       timeoutId = setTimeout(() => {
         worker.terminate().then(() => {
           activeWorkers.delete(taskId);
@@ -132,7 +151,7 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
             browser: task.browserType
           })));
         });
-      }, 60000); // Increased timeout
+      }, 120000); // 2 minute timeout
     });
   };
 
@@ -156,6 +175,20 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
 
     return results;
   };
+
+  // Force cleanup of any stray workers/browsers on process exit
+  const cleanupHandler = () => {
+    console.log(`[${new Date().toISOString()}] Cleanup: Terminating ${activeWorkers.size} active workers`);
+    activeWorkers.forEach((worker, id) => {
+      worker.terminate().catch(err => {
+        console.error(`[${new Date().toISOString()}] Error terminating worker ${id}: ${err}`);
+      });
+    });
+  };
+
+  // Register cleanup handlers
+  process.once('SIGINT', cleanupHandler);
+  process.once('SIGTERM', cleanupHandler);
 
   try {
     const results = await runTasksWithHighConcurrency();
@@ -186,5 +219,9 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
       error: "Failed to process bots",
       details: error instanceof Error ? error.message : String(error)
     });
+  } finally {
+    // Cleanup event handlers
+    process.off('SIGINT', cleanupHandler);
+    process.off('SIGTERM', cleanupHandler);
   }
 };
