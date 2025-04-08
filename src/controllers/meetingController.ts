@@ -32,11 +32,11 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
   console.log(`[${new Date().toISOString()}] Using origin: ${origin}`);
   const signature = generateSignature(meetingId, 0, duration);
 
-  const browserTypes: ('chromium' | 'firefox' | 'webkit')[] = ['chromium', 'firefox', 'webkit'];
+  const browserTypes: ('chromium' | 'firefox')[] = ['chromium', 'firefox'];
   const MIN_BOTS_PER_BROWSER = 2; // Reduced for testing
   const totalBots = bots.length;
   const botsPerBrowser = Math.max(MIN_BOTS_PER_BROWSER, Math.floor(totalBots / browserTypes.length));
-  const botPairsByBrowser: { [key: string]: Bot[][] } = { chromium: [], firefox: [], webkit: [] };
+  const botPairsByBrowser: { [key: string]: Bot[][] } = { chromium: [], firefox: [] };
 
   const shuffledBots = [...bots].sort(() => Math.random() - 0.5);
   let botIndex = 0;
@@ -64,8 +64,7 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
 
   console.log(`[${new Date().toISOString()}] Created ${tasks.length} bot pairs: ` +
     `Chromium: ${botPairsByBrowser.chromium.length} (${botPairsByBrowser.chromium.flat().length} bots), ` +
-    `Firefox: ${botPairsByBrowser.firefox.length} (${botPairsByBrowser.firefox.flat().length} bots), ` +
-    `Webkit: ${botPairsByBrowser.webkit.length} (${botPairsByBrowser.webkit.flat().length} bots)`);
+    `Firefox: ${botPairsByBrowser.firefox.length} (${botPairsByBrowser.firefox.flat().length} bots)`);
 
   console.log(`[${new Date().toISOString()}] Starting execution of ${tasks.length} tasks`);
 
@@ -175,10 +174,6 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
         firefox: {
           total: results.filter(r => r.browser === 'firefox').length,
           successes: results.filter(r => r.browser === 'firefox' && r.success).length
-        },
-        webkit: {
-          total: results.filter(r => r.browser === 'webkit').length,
-          successes: results.filter(r => r.browser === 'webkit' && r.success).length
         }
       }
     };
