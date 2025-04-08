@@ -25,17 +25,23 @@ export const workerScript = `
     let browser;
     let context;
 
-    // Options to optimize browser performance
+    // Base options for all browsers
     const launchOptions = {
       headless: true,
-      args: [
+      timeout: 30000 // Increased timeout for browser launch
+    };
+
+    // Apply browser-specific configurations
+    if (browserType === 'chromium') {
+      // Chromium-specific optimizations
+      launchOptions.args = [
         '--no-sandbox', 
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
         '--disable-gpu',
         '--no-first-run',
         '--no-zygote',
-        '--single-process', // Use a single process
+        '--single-process', 
         '--disable-extensions',
         '--disable-background-networking',
         '--disable-default-apps',
@@ -44,15 +50,7 @@ export const workerScript = `
         '--hide-scrollbars',
         '--metrics-recording-only',
         '--mute-audio',
-        '--no-default-browser-check'
-      ],
-      timeout: 30000 // Increased timeout for browser launch
-    };
-    
-    // Apply specific browser optimizations
-    if (browserType === 'chromium') {
-      // Additional Chromium-specific optimizations
-      launchOptions.args.push(
+        '--no-default-browser-check',
         '--disable-hang-monitor',
         '--disable-prompt-on-repost',
         '--disable-client-side-phishing-detection',
@@ -63,16 +61,34 @@ export const workerScript = `
         '--force-color-profile=srgb',
         '--disable-backgrounding-occluded-windows',
         '--disable-background-timer-throttling'
-      );
+      ];
     } else if (browserType === 'firefox') {
-      // Firefox-specific optimizations
+      // Firefox uses different mechanism for arguments
+      // Only use a minimal set of compatible arguments
+      launchOptions.args = [];
+      
+      // Firefox-specific optimizations through preferences
       launchOptions.firefoxUserPrefs = {
         'media.volume_scale': '0.0',
         'media.navigator.audio.fake_device': 'true',
         'media.navigator.permission.disabled': true,
         'media.navigator.streams.fake': true,
         'media.autoplay.block-webaudio': false,
-        'media.block-autoplay-until-in-foreground': false
+        'media.block-autoplay-until-in-foreground': false,
+        'browser.download.panel.shown': false,
+        'browser.download.useDownloadDir': true,
+        'browser.sessionstore.resume_from_crash': false,
+        'browser.shell.checkDefaultBrowser': false,
+        'toolkit.telemetry.enabled': false,
+        'toolkit.telemetry.rejected': true,
+        'toolkit.telemetry.server': '',
+        'datareporting.policy.dataSubmissionEnabled': false,
+        'datareporting.healthreport.uploadEnabled': false,
+        'extensions.autoDisableScopes': 15,
+        'extensions.enabledScopes': 0,
+        'dom.push.enabled': false,
+        'dom.webnotifications.enabled': false,
+        'network.cookie.cookieBehavior': 0
       };
     }
 
