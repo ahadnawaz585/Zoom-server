@@ -48,8 +48,8 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
   // Group bots into batches of 4 instead of pairs
   for (const browser of browserTypes) {
     // Group bots into larger batches (groups of 4)
-    for (let j = 0; j < shuffledBots.length; j += 10) {
-      const batch = shuffledBots.slice(j, Math.min(j + 10, shuffledBots.length));
+    for (let j = 0; j < shuffledBots.length; j += 4) {
+      const batch = shuffledBots.slice(j, Math.min(j + 4, shuffledBots.length));
       botBatchesByBrowser[browser].push(batch);
     }
   }
