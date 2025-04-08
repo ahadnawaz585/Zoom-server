@@ -25,6 +25,7 @@ export interface Task {
   disableVideo?:any;
   disableAudio?:any;
   lowResolution?:any;
+  lowMemoryMode?:any;
   password: string;
   origin: string;
   signature: string;

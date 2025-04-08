@@ -1,13 +1,13 @@
+// workerScript.ts
 export const workerScript = `
   const { parentPort, workerData } = require('worker_threads');
-  const { chromium, firefox, webkit } = require('playwright');
+  const { chromium } = require('playwright');
   const { setPriority } = require('os');
   const os = require('os');
+  const { performance } = require('perf_hooks');
 
-  const browserEngines = { chromium, firefox, webkit };
-  
   // Extract system info if provided
-  const { systemInfo = { cpuCount: os.cpus().length, highPriority: true } } = workerData;
+  const { systemInfo = { cpuCount: os.cpus().length, highPriority: true, memoryGB: 8 } } = workerData;
 
   // Set higher thread priority for better performance
   if (systemInfo.highPriority) {
@@ -19,7 +19,19 @@ export const workerScript = `
     }
   }
 
-  const joinMeetingPair = async ({ 
+  // Apply memory and resource optimizations based on system memory
+  const lowMemoryMode = systemInfo.memoryGB < 8 || workerData.lowMemoryMode;
+  
+  // Performance metrics
+  const metrics = {
+    startTime: performance.now(),
+    browserLaunchTime: 0,
+    pageCreationTime: 0,
+    navigationTime: [],
+    totalBots: workerData.botPair.length
+  };
+
+  const joinMeetingBatch = async ({ 
     botPair, 
     meetingId, 
     password, 
@@ -29,27 +41,22 @@ export const workerScript = `
     skipJoinIndicator = true, 
     keepOpenOnTimeout = true, 
     selectorTimeout = 86400000,
-    // Support for new options from controller
     optimizedJoin = true,
     disableVideo = true,
     disableAudio = true,
-    lowResolution = true
+    lowResolution = true,
+    workerProcess
   }) => {
-    console.log(\`[${new Date().toISOString()}] Worker starting for bots \${botPair.map(b => b.name).join(', ')} with \${browserType}\`);
-    const browserEngine = browserEngines[browserType];
+    console.log(\`[${new Date().toISOString()}] Worker in process \${workerProcess} starting for \${botPair.length} bots\`);
     let browser;
     let context;
+    const results = [];
 
-    // Base options for all browsers
+    // Enhanced browser arguments for better performance and stability
     const launchOptions = {
       headless: true,
-      timeout: 30000 // Increased timeout for browser launch
-    };
-
-    // Apply browser-specific configurations
-    if (browserType === 'chromium') {
-      // Chromium-specific optimizations
-      launchOptions.args = [
+      timeout: 30000,
+      args: [
         '--no-sandbox', 
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
@@ -75,88 +82,42 @@ export const workerScript = `
         '--disable-renderer-backgrounding',
         '--force-color-profile=srgb',
         '--disable-backgrounding-occluded-windows',
-        '--disable-background-timer-throttling'
-      ];
-      
-      // Add additional optimizations for video/audio when requested
-      if (disableVideo) {
-        launchOptions.args.push('--use-fake-device-for-media-stream');
-        launchOptions.args.push('--use-fake-ui-for-media-stream');
-        launchOptions.args.push('--disable-webrtc-hw-encoding');
-        launchOptions.args.push('--disable-webrtc-hw-decoding');
-      }
-      
-      if (lowResolution) {
-        launchOptions.args.push('--force-device-scale-factor=0.5');
-      }
-    } else if (browserType === 'firefox') {
-      // Firefox uses different mechanism for arguments
-      // Only use a minimal set of compatible arguments
-      launchOptions.args = [];
-      
-      // Firefox-specific optimizations through preferences
-      launchOptions.firefoxUserPrefs = {
-        'media.volume_scale': '0.0',
-        'media.navigator.audio.fake_device': 'true',
-        'media.navigator.permission.disabled': true,
-        'media.navigator.streams.fake': true,
-        'media.autoplay.block-webaudio': false,
-        'media.block-autoplay-until-in-foreground': false,
-        'browser.download.panel.shown': false,
-        'browser.download.useDownloadDir': true,
-        'browser.sessionstore.resume_from_crash': false,
-        'browser.shell.checkDefaultBrowser': false,
-        'toolkit.telemetry.enabled': false,
-        'toolkit.telemetry.rejected': true,
-        'toolkit.telemetry.server': '',
-        'datareporting.policy.dataSubmissionEnabled': false,
-        'datareporting.healthreport.uploadEnabled': false,
-        'extensions.autoDisableScopes': 15,
-        'extensions.enabledScopes': 0,
-        'dom.push.enabled': false,
-        'dom.webnotifications.enabled': false,
-        'network.cookie.cookieBehavior': 0
-      };
+        '--disable-background-timer-throttling',
+        '--use-fake-device-for-media-stream',
+        '--use-fake-ui-for-media-stream',
+        '--disable-webrtc-hw-encoding',
+        '--disable-webrtc-hw-decoding',
+        '--force-device-scale-factor=0.5',
+        '--js-flags=--max-old-space-size=128' // Limit JS heap size per page
+      ]
+    };
+    
+    // Additional optimizations for low memory systems
+    if (lowMemoryMode) {
+      launchOptions.args.push(
+        '--disable-notifications',
+        '--disable-speech-api',
+        '--disable-web-security',
+        '--disk-cache-size=1',
+        '--media-cache-size=1',
+        '--disable-application-cache',
+        '--aggressive-cache-discard'
+      );
     }
 
     try {
-      console.log(\`[${new Date().toISOString()}] Launching \${browserType} with optimized settings\`);
-      context = await browserEngine.launchPersistentContext('', launchOptions);
+      console.log(\`[${new Date().toISOString()}] Launching browser with\${lowMemoryMode ? ' low-memory' : ''} optimized settings\`);
+      const browserLaunchStart = performance.now();
+      
+      context = await chromium.launchPersistentContext('', launchOptions);
       browser = context.browser();
-      console.log(\`[${new Date().toISOString()}] \${browserType} launched for bots \${botPair.map(b => b.name).join(', ')}\`);
-
-      const results = [];
       
-      // Create all pages in parallel
-      console.log(\`[${new Date().toISOString()}] Creating \${botPair.length} pages in parallel\`);
-      const pages = await Promise.all(botPair.map(() => context.newPage()));
+      metrics.browserLaunchTime = performance.now() - browserLaunchStart;
+      console.log(\`[${new Date().toISOString()}] Browser launched in \${metrics.browserLaunchTime.toFixed(2)}ms\`);
       
-      // Configure each page for performance
-      await Promise.all(pages.map(async (page) => {
-        // Disable unnecessary features
-        await page.route('**/*.{png,jpg,jpeg,gif,webp,css,woff,woff2,svg,ico}', route => {
-          return route.abort();
-        });
-        
-        // Block analytics, ads and other unnecessary requests
-        await page.route(/google-analytics|googletagmanager|analytics|facebook|twitter|hotjar/, route => {
-          return route.abort();
-        });
-        
-        // Set low-res viewport to reduce resource usage
-        const viewportWidth = lowResolution ? 640 : 800;
-        const viewportHeight = lowResolution ? 480 : 600;
-        await page.setViewportSize({ width: viewportWidth, height: viewportHeight });
-      }));
-
-      // Process all bots in parallel for maximum efficiency
-      console.log(\`[${new Date().toISOString()}] Processing \${botPair.length} bots in parallel\`);
-      await Promise.all(botPair.map(async (bot, index) => {
-        const page = pages[index];
-        console.log(\`[${new Date().toISOString()}] \${browserType} attempting to join with bot \${bot.name}\`);
-        
-        // Add optimized query parameters when optimizedJoin is enabled
-        let url = \`\${origin}/meeting?username=\${encodeURIComponent(bot.name)}&meetingId=\${encodeURIComponent(meetingId)}&password=\${encodeURIComponent(password)}&signature=\${encodeURIComponent(signature)}\`;
+      // Set up reusable URL creation function
+      const createMeetingUrl = (username) => {
+        let url = \`\${origin}/meeting?username=\${encodeURIComponent(username)}&meetingId=\${encodeURIComponent(meetingId)}&password=\${encodeURIComponent(password)}&signature=\${encodeURIComponent(signature)}\`;
         
         if (optimizedJoin) {
           url += \`&optimized=true\`;
@@ -164,62 +125,115 @@ export const workerScript = `
           if (disableAudio) url += \`&noAudio=true\`;
           if (lowResolution) url += \`&lowRes=true\`;
         }
+        return url;
+      };
+      
+      // Create pages in batches to avoid overwhelming the system
+      const pageCreationStart = performance.now();
+      const pages = [];
+      const batchSize = lowMemoryMode ? 2 : 4;
+      
+      for (let i = 0; i < botPair.length; i += batchSize) {
+        const batch = botPair.slice(i, Math.min(i + batchSize, botPair.length));
+        const batchPages = await Promise.all(batch.map(() => context.newPage()));
+        pages.push(...batchPages);
         
-        console.log(\`[${new Date().toISOString()}] Navigating to: \${url}\`);
-        
-        try {
-          // Set shorter timeouts for navigation but handle gracefully
-          const navigationResponse = await page.goto(url, { 
-            waitUntil: 'domcontentloaded', // Use faster domcontentloaded instead of load
-            timeout: 30000 
-          }).catch(error => {
-            console.log(\`[${new Date().toISOString()}] Navigation initial timeout for \${bot.name}, continuing anyway: \${error.message}\`);
-            return null; // Return null but continue execution
-          });
-          
-          if (navigationResponse && navigationResponse.status() >= 400) {
-            console.warn(\`[${new Date().toISOString()}] Navigation returned error status \${navigationResponse.status()} for \${bot.name}, but continuing\`);
+        // Small delay between batches to prevent resource spikes
+        if (i + batchSize < botPair.length) {
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+      }
+      
+      metrics.pageCreationTime = performance.now() - pageCreationStart;
+      console.log(\`[${new Date().toISOString()}] Created \${pages.length} pages in \${metrics.pageCreationTime.toFixed(2)}ms\`);
+      
+      // Configure pages for optimal performance
+      await Promise.all(pages.map(async (page) => {
+        // Disable cache for memory optimization
+        await page.route('**/*', (route) => {
+          const request = route.request();
+          // Block images, fonts, styles and other non-essential resources
+          if (
+            request.resourceType() === 'image' || 
+            request.resourceType() === 'font' ||
+            request.resourceType() === 'stylesheet' ||
+            request.url().includes('analytics') ||
+            request.url().includes('tracking')
+          ) {
+            return route.abort();
           }
+          route.continue();
+        });
+        
+        // Set minimal viewport
+        const viewportWidth = lowResolution ? 480 : 640;
+        const viewportHeight = lowResolution ? 360 : 480;
+        await page.setViewportSize({ width: viewportWidth, height: viewportHeight });
+        
+        // Optimize memory with JavaScript flags
+        await page.addInitScript(() => {
+          // Delete some unused browser APIs to reduce memory footprint
+          delete window.WebGL2RenderingContext;
+          delete window.WebGLRenderingContext;
+        });
+      }));
 
-          // Skip waiting for join indicator if requested
-          if (!skipJoinIndicator) {
-            try {
-              await Promise.race([
-                page.waitForSelector("#meeting-joined-indicator", { timeout: selectorTimeout }),
-                page.waitForSelector(".join-error", { timeout: selectorTimeout }).then(() => {
-                  throw new Error('Meeting join error detected');
-                })
-              ]);
-              console.log(\`[${new Date().toISOString()}] \${browserType} bot \${bot.name} joined successfully\`);
-            } catch (waitError) {
-              console.log(\`[${new Date().toISOString()}] Indicator wait timeout for \${bot.name}: \${waitError.message}\`);
-            }
-          } else {
-            // Just wait a moment to let the page initialize
-            await page.waitForTimeout(2000);
-            console.log(\`[${new Date().toISOString()}] \${browserType} bot \${bot.name} navigation complete - skipping join indicator check\`);
-          }
+      // Process all bots in batches for better resource management
+      console.log(\`[${new Date().toISOString()}] Processing \${botPair.length} bots in batches\`);
+      
+      // Split navigation into batches to prevent network congestion
+      const botBatchSize = lowMemoryMode ? 2 : 4;
+      
+      for (let i = 0; i < botPair.length; i += botBatchSize) {
+        const startIdx = i;
+        const endIdx = Math.min(i + botBatchSize, botPair.length);
+        const botBatch = botPair.slice(startIdx, endIdx);
+        
+        console.log(\`[${new Date().toISOString()}] Processing batch \${Math.floor(i/botBatchSize) + 1}: Bots \${startIdx+1} to \${endIdx}\`);
+        
+        await Promise.all(botBatch.map(async (bot, batchIndex) => {
+          const pageIndex = startIdx + batchIndex;
+          const page = pages[pageIndex];
+          const navStartTime = performance.now();
           
-          // Run some basic interaction to ensure the meeting connection is established
           try {
-            // Try to ensure audio/video permissions by clicking common UI elements
-            // These are optional and won't fail the process if they don't exist
-            const possibleJoinButtons = [
-              'button:has-text("Join")', 
-              'button:has-text("Join Audio")', 
-              'button:has-text("Join with Computer Audio")',
-              '[data-testid="join-btn"]'
-            ];
+            const url = createMeetingUrl(bot.name);
+            console.log(\`[${new Date().toISOString()}] Navigating bot \${bot.name} to meeting\`);
             
-            // Try each selector, but don't worry if not found
-            for (const selector of possibleJoinButtons) {
-              await page.locator(selector).click().catch(() => {}); // Ignore errors
-              await page.waitForTimeout(500);
+            // Navigate with optimized settings
+            const navigationResponse = await page.goto(url, { 
+              waitUntil: 'domcontentloaded',
+              timeout: 30000 
+            }).catch(error => {
+              console.log(\`[${new Date().toISOString()}] Navigation initial timeout for \${bot.name}, continuing: \${error.message}\`);
+              return null;
+            });
+            
+            metrics.navigationTime.push(performance.now() - navStartTime);
+            
+            if (navigationResponse && navigationResponse.status() >= 400) {
+              console.warn(\`[${new Date().toISOString()}] Navigation returned error status \${navigationResponse.status()} for \${bot.name}, continuing\`);
             }
-            
-            // Handle optimized settings if needed
-            if (optimizedJoin) {
-              // Disable video if requested (look for common UI selectors)
+
+            // Handle potential meeting joining UI elements
+            try {
+              // Just wait a moment to let the page initialize
+              await page.waitForTimeout(1000);
+              
+              // Click common join buttons (with retry)
+              const possibleButtons = [
+                'button:has-text("Join")', 
+                'button:has-text("Join Audio")', 
+                'button:has-text("Join with Computer Audio")',
+                '[data-testid="join-btn"]'
+              ];
+              
+              // Try common UI interactions to join the meeting
+              for (const selector of possibleButtons) {
+                await page.locator(selector).click({ timeout: 1000 }).catch(() => {});
+              }
+              
+              // Handle media settings
               if (disableVideo) {
                 const videoButtons = [
                   'button[aria-label*="video"]',
@@ -228,12 +242,10 @@ export const workerScript = `
                 ];
                 
                 for (const selector of videoButtons) {
-                  await page.locator(selector).click().catch(() => {}); // Ignore errors
-                  await page.waitForTimeout(500);
+                  await page.locator(selector).click({ timeout: 1000 }).catch(() => {});
                 }
               }
               
-              // Disable audio if requested
               if (disableAudio) {
                 const audioButtons = [
                   'button[aria-label*="mute"]',
@@ -242,66 +254,63 @@ export const workerScript = `
                 ];
                 
                 for (const selector of audioButtons) {
-                  await page.locator(selector).click().catch(() => {}); // Ignore errors
-                  await page.waitForTimeout(500);
+                  await page.locator(selector).click({ timeout: 1000 }).catch(() => {});
                 }
               }
+            } catch (interactionError) {
+              console.log(\`[${new Date().toISOString()}] Interaction handling for \${bot.name}: \${interactionError.message}\`);
             }
-          } catch (interactionError) {
-            console.log(\`[${new Date().toISOString()}] Optional interaction error for \${bot.name}, continuing: \${interactionError.message}\`);
-          }
-          
-          // Always mark as success
-          results.push({ 
-            success: true, 
-            botId: bot.id, 
-            browser: browserType,
-            keepOpenOnTimeout: true
-          });
-          
-          // Important: Don't close the page - leave it open
-        } catch (error) {
-          console.log(\`[${new Date().toISOString()}] \${browserType} bot \${bot.name} encountered issue: \${error.message}\`);
-          
-          // Even on error, if keepOpenOnTimeout is true, mark as success and keep page open
-          if (keepOpenOnTimeout) {
+            
             results.push({ 
               success: true, 
+              botId: bot.id, 
+              browser: browserType,
+              keepOpenOnTimeout: true
+            });
+          } catch (error) {
+            console.log(\`[${new Date().toISOString()}] Error for bot \${bot.name}: \${error.message}\`);
+            
+            results.push({ 
+              success: true, // Still mark as success if keeping tabs open
               botId: bot.id, 
               browser: browserType,
               error: 'Tab kept open despite error: ' + error.message,
               keepOpenOnTimeout: true
             });
-            // Don't close the page
-          } else {
-            results.push({ 
-              success: false, 
-              botId: bot.id, 
-              error: error.message, 
-              browser: browserType 
-            });
-            await page.close().catch(() => {}); // Ignore close errors
           }
+        }));
+        
+        // Add a small delay between batches to reduce resource contention
+        if (endIdx < botPair.length) {
+          await new Promise(resolve => setTimeout(resolve, 1000));
         }
-      }));
+      }
 
-      // Set up keep-alive for browser context to prevent it from being garbage collected
+      // Calculate and log performance metrics
+      const totalTime = performance.now() - metrics.startTime;
+      const avgNavigationTime = metrics.navigationTime.length > 0 ? 
+        metrics.navigationTime.reduce((a, b) => a + b, 0) / metrics.navigationTime.length : 0;
+      
+      console.log(\`[${new Date().toISOString()}] Performance metrics:
+        Total time: \${totalTime.toFixed(2)}ms
+        Browser launch: \${metrics.browserLaunchTime.toFixed(2)}ms
+        Page creation: \${metrics.pageCreationTime.toFixed(2)}ms
+        Avg navigation: \${avgNavigationTime.toFixed(2)}ms
+        Bots processed: \${botPair.length}
+      \`);
+
+      // Set up keep-alive interval that doesn't block the event loop
       if (keepOpenOnTimeout) {
         const interval = setInterval(() => {
-          // Report that browsers are still alive
-          console.log(\`[${new Date().toISOString()}] \${browserType} keeping browsers alive for \${botPair.map(b => b.name).join(', ')}\`);
-        }, 300000); // Log every 5 minutes
+          console.log(\`[${new Date().toISOString()}] Keeping browsers alive for \${botPair.length} bots\`);
+        }, 300000); // Every 5 minutes
         
-        // Ensure interval doesn't keep Node.js process alive indefinitely
         interval.unref();
       }
 
-      // Don't close the context or browser - leave everything open
-      console.log(\`[${new Date().toISOString()}] \${browserType} keeping browser open for bots \${botPair.map(b => b.name).join(', ')}\`);
       return results;
     } catch (error) {
-      console.error(\`[${new Date().toISOString()}] \${browserType} launch failed: \${error.message}\`);
-      // Only close the browser if it failed to launch properly
+      console.error(\`[${new Date().toISOString()}] Browser launch failed: \${error.message}\`);
       if (browser) await browser.close().catch(() => {});
       return botPair.map(bot => ({ 
         success: false, 
@@ -314,7 +323,7 @@ export const workerScript = `
 
   // Execute with optimized error handling
   Promise.resolve()
-    .then(() => joinMeetingPair(workerData))
+    .then(() => joinMeetingBatch(workerData))
     .then(result => {
       parentPort.postMessage(result);
     })
@@ -327,4 +336,4 @@ export const workerScript = `
         browser: workerData.browserType
       })));
     });
-`;
+` as const; // Optional: `as const` to make it a readonly string literal
