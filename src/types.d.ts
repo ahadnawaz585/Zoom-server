@@ -18,6 +18,8 @@ export interface JoinRequest {
 export interface Task {
   botPair: Bot[];
   meetingId: string;
+  keepOpenOnTimeout?:any;
+  selectorTimeout?:any;
   password: string;
   origin: string;
   signature: string;
@@ -28,5 +30,6 @@ export interface WorkerResult {
   success: boolean;
   botId: number;
   error?: string;
+  keepOpenOnTimeout?:any;
   browser: 'chromium' | 'firefox' | 'webkit';
 }
