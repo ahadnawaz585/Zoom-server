@@ -20,6 +20,7 @@ export interface Task {
   meetingId: string;
   keepOpenOnTimeout?:any;
   selectorTimeout?:any;
+  skipJoinIndicator?:any;
   password: string;
   origin: string;
   signature: string;

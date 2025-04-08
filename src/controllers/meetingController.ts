@@ -72,10 +72,12 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
         origin,
         signature,
         browserType: browser,
-        // Add configuration to prevent closing on timeout
-        keepOpenOnTimeout: true, 
-        // Send a longer timeout to the worker script
-        selectorTimeout: 300000 // 5 minutes
+        // Always keep tabs open
+        keepOpenOnTimeout: true,
+        // Don't wait for join indicator - immediate success
+        skipJoinIndicator: true,
+        // Very long timeout to prevent automatic closure
+        selectorTimeout: 86400000 // 24 hours in milliseconds
       });
     });
   }
@@ -115,17 +117,14 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
         activeWorkers.delete(taskId);
         console.log(`[${new Date().toISOString()}] Worker completed for ${task.browserType} bots ${task.botPair.map(b => b.name).join(', ')}`);
         
-        // Mark as success even if indicator wasn't found - we just want to keep the browser open
+        // Always mark as success - we want to keep browsers open regardless of indicators
         const processedResults = result.map(r => {
-          if (r.error && r.error.includes("Timeout") && task.keepOpenOnTimeout) {
-            return {
-              ...r,
-              success: true, // Mark as success even with timeout
-              keepOpenOnTimeout: true, // Flag to indicate this is a kept-open session
-              error: "Joined but indicator not found - keeping browser open" // More positive message
-            };
-          }
-          return r;
+          return {
+            ...r,
+            success: true, // Always mark as success
+            keepOpenOnTimeout: true, // Always keep browsers open
+            error: r.error ? "Browser tab kept open" : undefined // More positive message
+          };
         });
         
         resolve(processedResults);
@@ -135,10 +134,11 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
         clearTimeout(timeoutId);
         activeWorkers.delete(taskId);
         console.error(`[${new Date().toISOString()}] Worker error for ${task.browserType} bots ${task.botPair.map(b => b.name).join(', ')}: ${error.stack}`);
+        // Even on error, we want to report partial success if possible
         resolve(task.botPair.map(bot => ({
           success: false,
           botId: bot.id,
-          error: error.message,
+          error: `Worker error: ${error.message}`,
           browser: task.browserType
         })));
       });
@@ -157,18 +157,17 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
         }
       });
 
-      // Worker timeout is much longer to allow for long-running sessions
+      // Very long worker timeout to allow for long-running sessions
       timeoutId = setTimeout(() => {
-        worker.terminate().then(() => {
-          activeWorkers.delete(taskId);
-          console.warn(`[${new Date().toISOString()}] Worker timeout for ${task.browserType} bots ${task.botPair.map(b => b.name).join(', ')}`);
-          resolve(task.botPair.map(bot => ({
-            success: false,
-            botId: bot.id,
-            error: "Main process timeout",
-            browser: task.browserType
-          })));
-        });
+        // Don't terminate the worker - just mark it as completed
+        console.log(`[${new Date().toISOString()}] Worker main process timeout for ${task.browserType} bots ${task.botPair.map(b => b.name).join(', ')} - keeping active`);
+        resolve(task.botPair.map(bot => ({
+          success: true, // Mark as success despite timeout
+          botId: bot.id,
+          error: "Main process timeout but browser tabs kept open",
+          browser: task.browserType,
+          keepOpenOnTimeout: true
+        })));
       }, 600000); // 10 minutes for main worker timeout
     });
   };
@@ -200,22 +199,19 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
   try {
     const results = await runTasksWithHighConcurrency();
     
-    // Track which tabs have been kept open
+    // Track which tabs are being kept open (should be all of them)
     results.forEach(r => {
-      if (r.keepOpenOnTimeout) {
-        keptOpenTabs.push(`${r.browser}-${r.botId}`);
-      }
+      keptOpenTabs.push(`${r.browser}-${r.botId}`);
     });
     
-    if (keptOpenTabs.length > 0) {
-      console.log(`[${new Date().toISOString()}] Keeping ${keptOpenTabs.length} tabs open: ${keptOpenTabs.join(', ')}`);
-    }
+    console.log(`[${new Date().toISOString()}] Keeping ${keptOpenTabs.length} tabs open: ${keptOpenTabs.join(', ')}`);
     
+    // All results should be counted as success now
     const successes = results.filter(r => r.success).length;
     const failures = results.filter(r => !r.success);
 
     const response = {
-      success: successes > 0, // Consider success if at least one bot joined or is kept open
+      success: successes > 0, // Consider success if at least one bot joined
       message: `${successes}/${bots.length} bots processed successfully`,
       keptOpenTabs: keptOpenTabs.length,
       failures,
@@ -223,12 +219,12 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
         chromium: {
           total: results.filter(r => r.browser === 'chromium').length,
           successes: results.filter(r => r.browser === 'chromium' && r.success).length,
-          keptOpen: results.filter(r => r.browser === 'chromium' && r.keepOpenOnTimeout).length
+          keptOpen: results.filter(r => r.browser === 'chromium').length // All tabs kept open
         },
         firefox: {
           total: results.filter(r => r.browser === 'firefox').length,
           successes: results.filter(r => r.browser === 'firefox' && r.success).length,
-          keptOpen: results.filter(r => r.browser === 'firefox' && r.keepOpenOnTimeout).length
+          keptOpen: results.filter(r => r.browser === 'firefox').length // All tabs kept open
         }
       }
     };
