@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import { Worker } from 'worker_threads';
-import { setPriority } from 'os';
+import { setPriority, cpus } from 'os';
 import { Bot, JoinRequest, Task, WorkerResult } from '../types';
 import { generateSignature } from '../utils/signature';
 import { generateBots } from '../utils/botUtils';
@@ -10,7 +10,7 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
   console.log(`[${new Date().toISOString()}] Received join meeting request`);
   const body = req.body as JoinRequest;
   let { bots, meetingId, password, botCount = 0, duration = 60 } = body;
-  
+  const maxParallel =10;
   console.log("Request received:", bots, meetingId, password, botCount, duration);
 
   if (!meetingId || !password) {
@@ -90,18 +90,65 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
     `Firefox: ${botPairsByBrowser.firefox.length} (${firefoxBots} bots)`);
   console.log(`[${new Date().toISOString()}] Total bots distributed: ${chromiumBots + firefoxBots} out of ${totalBots}`);
 
-  console.log(`[${new Date().toISOString()}] Starting execution of ${tasks.length} tasks`);
+  // Calculate optimal number of concurrent workers based on available CPU cores
+  const cpuCount = cpus().length;
+  // Use all available CPUs, and let the user override if desired
+  const MAX_CONCURRENT_WORKERS = maxParallel || Math.max(cpuCount, tasks.length);
+  
+  console.log(`[${new Date().toISOString()}] Starting execution with maximum parallelism: ${MAX_CONCURRENT_WORKERS} concurrent workers`);
 
-  const MAX_CONCURRENT_WORKERS = 3;
+  // Create a semaphore for controlling concurrency
+  class Semaphore {
+    private permits: number;
+    private queue: (() => void)[] = [];
+
+    constructor(permits: number) {
+      this.permits = permits;
+    }
+
+    async acquire(): Promise<void> {
+      if (this.permits > 0) {
+        this.permits--;
+        return Promise.resolve();
+      }
+
+      return new Promise<void>((resolve) => {
+        this.queue.push(resolve);
+      });
+    }
+
+    release(): void {
+      if (this.queue.length > 0) {
+        const resolve = this.queue.shift()!;
+        resolve();
+      } else {
+        this.permits++;
+      }
+    }
+  }
+
+  const semaphore = new Semaphore(MAX_CONCURRENT_WORKERS);
   const activeWorkers = new Map<string, Worker>();
 
   const executeTask = async (task: Task): Promise<WorkerResult[]> => {
     const taskId = `${task.browserType}-${task.botPair.map(b => b.id).join('-')}`;
-    console.log(`[${new Date().toISOString()}] Queuing task ${taskId} with ${task.browserType}`);
-    return new Promise((resolve) => {
+    
+    // Wait for a permit before starting the task
+    await semaphore.acquire();
+    
+    console.log(`[${new Date().toISOString()}] Starting task ${taskId} with ${task.browserType} (active workers: ${activeWorkers.size})`);
+    
+    return new Promise<WorkerResult[]>((resolve) => {
       const worker = new Worker(workerScript, { 
         eval: true,
-        workerData: task,
+        workerData: {
+          ...task,
+          // Pass system information to optimize worker performance
+          systemInfo: {
+            cpuCount,
+            highPriority: true,
+          }
+        },
         resourceLimits: {
           maxOldGenerationSizeMb: 300,
           maxYoungGenerationSizeMb: 150,
@@ -127,6 +174,7 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
           };
         });
         
+        semaphore.release(); // Release the permit for other tasks
         resolve(processedResults);
       });
 
@@ -135,6 +183,7 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
         activeWorkers.delete(taskId);
         console.error(`[${new Date().toISOString()}] Worker error for ${task.browserType} bots ${task.botPair.map(b => b.name).join(', ')}: ${error.stack}`);
         // Even on error, we want to report partial success if possible
+        semaphore.release(); // Release the permit for other tasks
         resolve(task.botPair.map(bot => ({
           success: false,
           botId: bot.id,
@@ -148,6 +197,7 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
           clearTimeout(timeoutId);
           activeWorkers.delete(taskId);
           console.error(`[${new Date().toISOString()}] Worker exited with code ${code} for ${task.browserType} bots ${task.botPair.map(b => b.name).join(', ')}`);
+          semaphore.release(); // Release the permit for other tasks
           resolve(task.botPair.map(bot => ({
             success: false,
             botId: bot.id,
@@ -161,6 +211,7 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
       timeoutId = setTimeout(() => {
         // Don't terminate the worker - just mark it as completed
         console.log(`[${new Date().toISOString()}] Worker main process timeout for ${task.browserType} bots ${task.botPair.map(b => b.name).join(', ')} - keeping active`);
+        semaphore.release(); // Release the permit for other tasks
         resolve(task.botPair.map(bot => ({
           success: true, // Mark as success despite timeout
           botId: bot.id,
@@ -172,10 +223,7 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
     });
   };
 
-  const runTasksWithHighConcurrency = async () => {
-    const results: WorkerResult[] = [];
-    const queue = [...tasks];
-
+  const runTasksWithMaxParallelism = async () => {
     try {
       setPriority(19); // High priority (19 on Unix-like, use -20 for Windows)
       console.log(`[${new Date().toISOString()}] Set main process to high priority`);
@@ -183,21 +231,24 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
       console.warn(`[${new Date().toISOString()}] Failed to set process priority: ${error}`);
     }
 
-    while (queue.length > 0) {
-      const batch = queue.splice(0, MAX_CONCURRENT_WORKERS);
-      console.log(`[${new Date().toISOString()}] Processing batch of ${batch.length} tasks`);
-      const batchResults = await Promise.all(batch.map(task => executeTask(task)));
-      results.push(...batchResults.flat());
-    }
-
-    return results;
+    // Start all tasks in parallel, with concurrency controlled by the semaphore
+    console.log(`[${new Date().toISOString()}] Launching ${tasks.length} tasks with max concurrency of ${MAX_CONCURRENT_WORKERS}`);
+    const start = Date.now();
+    
+    // Schedule all tasks at once, but execution will be controlled by the semaphore
+    const results = await Promise.all(tasks.map(task => executeTask(task)));
+    
+    const elapsed = (Date.now() - start) / 1000;
+    console.log(`[${new Date().toISOString()}] All tasks completed in ${elapsed.toFixed(2)} seconds`);
+    
+    return results.flat();
   };
 
   // Keep track of tabs that should remain open
   const keptOpenTabs: string[] = [];
 
   try {
-    const results = await runTasksWithHighConcurrency();
+    const results = await runTasksWithMaxParallelism();
     
     // Track which tabs are being kept open (should be all of them)
     results.forEach(r => {
@@ -226,6 +277,11 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
           successes: results.filter(r => r.browser === 'firefox' && r.success).length,
           keptOpen: results.filter(r => r.browser === 'firefox').length // All tabs kept open
         }
+      },
+      performance: {
+        totalWorkers: tasks.length,
+        maxConcurrentWorkers: MAX_CONCURRENT_WORKERS,
+        cpuCount
       }
     };
 
@@ -235,7 +291,11 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
     console.error(`[${new Date().toISOString()}] Processing error: ${error instanceof Error ? error.stack : String(error)}`);
     res.status(500).json({ 
       error: "Failed to process bots",
-      details: error instanceof Error ? error.message : String(error)
+      details: error instanceof Error ? error.message : String(error),
+      systemInfo: {
+        cpuCount,
+        attemptedConcurrency: MAX_CONCURRENT_WORKERS
+      }
     });
   }
 };
