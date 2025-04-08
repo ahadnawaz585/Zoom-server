@@ -21,6 +21,10 @@ export interface Task {
   keepOpenOnTimeout?:any;
   selectorTimeout?:any;
   skipJoinIndicator?:any;
+  optimizedJoin?:any;
+  disableVideo?:any;
+  disableAudio?:any;
+  lowResolution?:any;
   password: string;
   origin: string;
   signature: string;

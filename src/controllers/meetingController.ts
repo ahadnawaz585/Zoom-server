@@ -5,13 +5,14 @@ import { Bot, JoinRequest, Task, WorkerResult } from '../types';
 import { generateSignature } from '../utils/signature';
 import { generateBots } from '../utils/botUtils';
 import { workerScript } from '../utils/workerScript';
+import { start } from 'repl';
 
 export const joinMeeting = async (req: Request, res: Response): Promise<void> => {
   console.log(`[${new Date().toISOString()}] Received join meeting request`);
   const body = req.body as JoinRequest;
   let { bots, meetingId, password, botCount = 0, duration = 60 } = body;
-  const maxParallel =10;
-  console.log("Request received:", bots, meetingId, password, botCount, duration);
+  const maxParallel = 50; // Increased from 10 to 50 for higher parallelism
+  console.log("Request received:", meetingId, password, botCount, duration);
 
   if (!meetingId || !password) {
     console.error(`[${new Date().toISOString()}] Missing required fields`);
@@ -32,68 +33,59 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
   console.log(`[${new Date().toISOString()}] Using origin: ${origin}`);
   const signature = generateSignature(meetingId, 0, duration);
 
-  const browserTypes: ('chromium' | 'firefox')[] = ['chromium', 'firefox'];
+  // Use only Chromium for faster performance
+  const browserTypes: ('chromium')[] = ['chromium'];
   
   // Ensure even distribution of bots
   const totalBots = bots.length;
   const shuffledBots = [...bots].sort(() => Math.random() - 0.5);
   
-  // Calculate how many bots per browser type
-  const botsPerBrowserType = Math.ceil(totalBots / browserTypes.length);
-  
   // Initialize bot distribution structure
-  const botPairsByBrowser: { [key: string]: Bot[][] } = { 
-    chromium: [], 
-    firefox: [] 
+  const botBatchesByBrowser: { [key: string]: Bot[][] } = { 
+    chromium: []
   };
   
-  // Distribute bots evenly across browser types
-  for (let i = 0; i < browserTypes.length; i++) {
-    const browser = browserTypes[i];
-    const startIdx = i * botsPerBrowserType;
-    const endIdx = Math.min(startIdx + botsPerBrowserType, totalBots);
-    const botsForThisBrowser = shuffledBots.slice(startIdx, endIdx);
-    
-    // Group bots into pairs (or single bot if odd number)
-    for (let j = 0; j < botsForThisBrowser.length; j += 2) {
-      const pair = botsForThisBrowser.slice(j, Math.min(j + 2, botsForThisBrowser.length));
-      botPairsByBrowser[browser].push(pair);
+  // Group bots into batches of 4 instead of pairs
+  for (const browser of browserTypes) {
+    // Group bots into larger batches (groups of 4)
+    for (let j = 0; j < shuffledBots.length; j += 4) {
+      const batch = shuffledBots.slice(j, Math.min(j + 4, shuffledBots.length));
+      botBatchesByBrowser[browser].push(batch);
     }
   }
 
   // Create tasks from the distributed bots
   const tasks: Task[] = [];
   for (const browser of browserTypes) {
-    botPairsByBrowser[browser].forEach(botPair => {
+    botBatchesByBrowser[browser].forEach(botBatch => {
       tasks.push({
-        botPair,
+        botPair: botBatch, // Now contains up to 4 bots
         meetingId,
         password,
         origin,
         signature,
         browserType: browser,
-        // Always keep tabs open
         keepOpenOnTimeout: true,
-        // Don't wait for join indicator - immediate success
         skipJoinIndicator: true,
-        // Very long timeout to prevent automatic closure
-        selectorTimeout: 86400000 // 24 hours in milliseconds
+        selectorTimeout: 86400000,
+        // Add new options for faster joining
+        optimizedJoin: true, // Flag for worker script to use optimized settings
+        disableVideo: true,  // Flag to disable video
+        disableAudio: true,  // Flag to disable audio
+        lowResolution: true  // Flag to use low resolution
       });
     });
   }
 
   // Log bot distribution
-  const chromiumBots = botPairsByBrowser.chromium.flat().length;
-  const firefoxBots = botPairsByBrowser.firefox.flat().length;
-  console.log(`[${new Date().toISOString()}] Created ${tasks.length} bot pairs: ` +
-    `Chromium: ${botPairsByBrowser.chromium.length} (${chromiumBots} bots), ` +
-    `Firefox: ${botPairsByBrowser.firefox.length} (${firefoxBots} bots)`);
-  console.log(`[${new Date().toISOString()}] Total bots distributed: ${chromiumBots + firefoxBots} out of ${totalBots}`);
+  const chromiumBots = botBatchesByBrowser.chromium.flat().length;
+  console.log(`[${new Date().toISOString()}] Created ${tasks.length} bot batches: ` +
+    `Chromium: ${botBatchesByBrowser.chromium.length} (${chromiumBots} bots)`);
+  console.log(`[${new Date().toISOString()}] Total bots distributed: ${chromiumBots} out of ${totalBots}`);
 
-  // Calculate optimal number of concurrent workers based on available CPU cores
+  // Calculate optimal number of concurrent workers
   const cpuCount = cpus().length;
-  // Use all available CPUs, and let the user override if desired
-  const MAX_CONCURRENT_WORKERS = maxParallel || Math.max(cpuCount, tasks.length);
+  const MAX_CONCURRENT_WORKERS = maxParallel || Math.max(cpuCount * 2, tasks.length);
   
   console.log(`[${new Date().toISOString()}] Starting execution with maximum parallelism: ${MAX_CONCURRENT_WORKERS} concurrent workers`);
 
@@ -143,15 +135,15 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
         eval: true,
         workerData: {
           ...task,
-          // Pass system information to optimize worker performance
           systemInfo: {
             cpuCount,
             highPriority: true,
           }
         },
+        // Reduced resource limits for faster startup and more concurrent workers
         resourceLimits: {
-          maxOldGenerationSizeMb: 300,
-          maxYoungGenerationSizeMb: 150,
+          maxOldGenerationSizeMb: 200,
+          maxYoungGenerationSizeMb: 100,
         }
       });
 
@@ -164,17 +156,16 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
         activeWorkers.delete(taskId);
         console.log(`[${new Date().toISOString()}] Worker completed for ${task.browserType} bots ${task.botPair.map(b => b.name).join(', ')}`);
         
-        // Always mark as success - we want to keep browsers open regardless of indicators
         const processedResults = result.map(r => {
           return {
             ...r,
-            success: true, // Always mark as success
-            keepOpenOnTimeout: true, // Always keep browsers open
-            error: r.error ? "Browser tab kept open" : undefined // More positive message
+            success: true,
+            keepOpenOnTimeout: true,
+            error: r.error ? "Browser tab kept open" : undefined
           };
         });
         
-        semaphore.release(); // Release the permit for other tasks
+        semaphore.release();
         resolve(processedResults);
       });
 
@@ -182,8 +173,7 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
         clearTimeout(timeoutId);
         activeWorkers.delete(taskId);
         console.error(`[${new Date().toISOString()}] Worker error for ${task.browserType} bots ${task.botPair.map(b => b.name).join(', ')}: ${error.stack}`);
-        // Even on error, we want to report partial success if possible
-        semaphore.release(); // Release the permit for other tasks
+        semaphore.release();
         resolve(task.botPair.map(bot => ({
           success: false,
           botId: bot.id,
@@ -197,7 +187,7 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
           clearTimeout(timeoutId);
           activeWorkers.delete(taskId);
           console.error(`[${new Date().toISOString()}] Worker exited with code ${code} for ${task.browserType} bots ${task.botPair.map(b => b.name).join(', ')}`);
-          semaphore.release(); // Release the permit for other tasks
+          semaphore.release();
           resolve(task.botPair.map(bot => ({
             success: false,
             botId: bot.id,
@@ -207,35 +197,33 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
         }
       });
 
-      // Very long worker timeout to allow for long-running sessions
+      // Shorter timeout for faster error handling
       timeoutId = setTimeout(() => {
-        // Don't terminate the worker - just mark it as completed
         console.log(`[${new Date().toISOString()}] Worker main process timeout for ${task.browserType} bots ${task.botPair.map(b => b.name).join(', ')} - keeping active`);
-        semaphore.release(); // Release the permit for other tasks
+        semaphore.release();
         resolve(task.botPair.map(bot => ({
-          success: true, // Mark as success despite timeout
+          success: true,
           botId: bot.id,
           error: "Main process timeout but browser tabs kept open",
           browser: task.browserType,
           keepOpenOnTimeout: true
         })));
-      }, 600000); // 10 minutes for main worker timeout
+      }, 60000); // Reduced from 600000 (10 min) to 60000 (1 min)
     });
   };
 
   const runTasksWithMaxParallelism = async () => {
     try {
-      setPriority(19); // High priority (19 on Unix-like, use -20 for Windows)
-      console.log(`[${new Date().toISOString()}] Set main process to high priority`);
+      // Set max priority - 0 is highest on Unix-like systems
+      setPriority(0);
+      console.log(`[${new Date().toISOString()}] Set main process to highest priority`);
     } catch (error) {
       console.warn(`[${new Date().toISOString()}] Failed to set process priority: ${error}`);
     }
 
-    // Start all tasks in parallel, with concurrency controlled by the semaphore
     console.log(`[${new Date().toISOString()}] Launching ${tasks.length} tasks with max concurrency of ${MAX_CONCURRENT_WORKERS}`);
     const start = Date.now();
     
-    // Schedule all tasks at once, but execution will be controlled by the semaphore
     const results = await Promise.all(tasks.map(task => executeTask(task)));
     
     const elapsed = (Date.now() - start) / 1000;
@@ -244,25 +232,22 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
     return results.flat();
   };
 
-  // Keep track of tabs that should remain open
   const keptOpenTabs: string[] = [];
 
   try {
     const results = await runTasksWithMaxParallelism();
     
-    // Track which tabs are being kept open (should be all of them)
     results.forEach(r => {
       keptOpenTabs.push(`${r.browser}-${r.botId}`);
     });
     
     console.log(`[${new Date().toISOString()}] Keeping ${keptOpenTabs.length} tabs open: ${keptOpenTabs.join(', ')}`);
     
-    // All results should be counted as success now
     const successes = results.filter(r => r.success).length;
     const failures = results.filter(r => !r.success);
-
+    const startTime = Date.now();
     const response = {
-      success: successes > 0, // Consider success if at least one bot joined
+      success: successes > 0,
       message: `${successes}/${bots.length} bots processed successfully`,
       keptOpenTabs: keptOpenTabs.length,
       failures,
@@ -270,18 +255,14 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
         chromium: {
           total: results.filter(r => r.browser === 'chromium').length,
           successes: results.filter(r => r.browser === 'chromium' && r.success).length,
-          keptOpen: results.filter(r => r.browser === 'chromium').length // All tabs kept open
-        },
-        firefox: {
-          total: results.filter(r => r.browser === 'firefox').length,
-          successes: results.filter(r => r.browser === 'firefox' && r.success).length,
-          keptOpen: results.filter(r => r.browser === 'firefox').length // All tabs kept open
+          keptOpen: results.filter(r => r.browser === 'chromium').length
         }
       },
       performance: {
         totalWorkers: tasks.length,
         maxConcurrentWorkers: MAX_CONCURRENT_WORKERS,
-        cpuCount
+        cpuCount,
+        executionTimeSeconds: (Date.now() - startTime) / 1000
       }
     };
 

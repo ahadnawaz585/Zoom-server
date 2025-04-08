@@ -19,7 +19,22 @@ export const workerScript = `
     }
   }
 
-  const joinMeetingPair = async ({ botPair, meetingId, password, origin, signature, browserType, skipJoinIndicator = true, keepOpenOnTimeout = true, selectorTimeout = 86400000 }) => {
+  const joinMeetingPair = async ({ 
+    botPair, 
+    meetingId, 
+    password, 
+    origin, 
+    signature, 
+    browserType,
+    skipJoinIndicator = true, 
+    keepOpenOnTimeout = true, 
+    selectorTimeout = 86400000,
+    // Support for new options from controller
+    optimizedJoin = true,
+    disableVideo = true,
+    disableAudio = true,
+    lowResolution = true
+  }) => {
     console.log(\`[${new Date().toISOString()}] Worker starting for bots \${botPair.map(b => b.name).join(', ')} with \${browserType}\`);
     const browserEngine = browserEngines[browserType];
     let browser;
@@ -62,6 +77,18 @@ export const workerScript = `
         '--disable-backgrounding-occluded-windows',
         '--disable-background-timer-throttling'
       ];
+      
+      // Add additional optimizations for video/audio when requested
+      if (disableVideo) {
+        launchOptions.args.push('--use-fake-device-for-media-stream');
+        launchOptions.args.push('--use-fake-ui-for-media-stream');
+        launchOptions.args.push('--disable-webrtc-hw-encoding');
+        launchOptions.args.push('--disable-webrtc-hw-decoding');
+      }
+      
+      if (lowResolution) {
+        launchOptions.args.push('--force-device-scale-factor=0.5');
+      }
     } else if (browserType === 'firefox') {
       // Firefox uses different mechanism for arguments
       // Only use a minimal set of compatible arguments
@@ -117,7 +144,9 @@ export const workerScript = `
         });
         
         // Set low-res viewport to reduce resource usage
-        await page.setViewportSize({ width: 800, height: 600 });
+        const viewportWidth = lowResolution ? 640 : 800;
+        const viewportHeight = lowResolution ? 480 : 600;
+        await page.setViewportSize({ width: viewportWidth, height: viewportHeight });
       }));
 
       // Process all bots in parallel for maximum efficiency
@@ -126,8 +155,17 @@ export const workerScript = `
         const page = pages[index];
         console.log(\`[${new Date().toISOString()}] \${browserType} attempting to join with bot \${bot.name}\`);
         
-        const url = \`\${origin}/meeting?username=\${encodeURIComponent(bot.name)}&meetingId=\${encodeURIComponent(meetingId)}&password=\${encodeURIComponent(password)}&signature=\${encodeURIComponent(signature)}\`;
-        console.log(url);
+        // Add optimized query parameters when optimizedJoin is enabled
+        let url = \`\${origin}/meeting?username=\${encodeURIComponent(bot.name)}&meetingId=\${encodeURIComponent(meetingId)}&password=\${encodeURIComponent(password)}&signature=\${encodeURIComponent(signature)}\`;
+        
+        if (optimizedJoin) {
+          url += \`&optimized=true\`;
+          if (disableVideo) url += \`&noVideo=true\`;
+          if (disableAudio) url += \`&noAudio=true\`;
+          if (lowResolution) url += \`&lowRes=true\`;
+        }
+        
+        console.log(\`[${new Date().toISOString()}] Navigating to: \${url}\`);
         
         try {
           // Set shorter timeouts for navigation but handle gracefully
@@ -177,6 +215,37 @@ export const workerScript = `
             for (const selector of possibleJoinButtons) {
               await page.locator(selector).click().catch(() => {}); // Ignore errors
               await page.waitForTimeout(500);
+            }
+            
+            // Handle optimized settings if needed
+            if (optimizedJoin) {
+              // Disable video if requested (look for common UI selectors)
+              if (disableVideo) {
+                const videoButtons = [
+                  'button[aria-label*="video"]',
+                  'button[title*="video"]',
+                  '[data-testid="video-btn"]'
+                ];
+                
+                for (const selector of videoButtons) {
+                  await page.locator(selector).click().catch(() => {}); // Ignore errors
+                  await page.waitForTimeout(500);
+                }
+              }
+              
+              // Disable audio if requested
+              if (disableAudio) {
+                const audioButtons = [
+                  'button[aria-label*="mute"]',
+                  'button[title*="mute"]',
+                  '[data-testid="audio-btn"]'
+                ];
+                
+                for (const selector of audioButtons) {
+                  await page.locator(selector).click().catch(() => {}); // Ignore errors
+                  await page.waitForTimeout(500);
+                }
+              }
             }
           } catch (interactionError) {
             console.log(\`[${new Date().toISOString()}] Optional interaction error for \${bot.name}, continuing: \${interactionError.message}\`);
