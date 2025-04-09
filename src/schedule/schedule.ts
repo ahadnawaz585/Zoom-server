@@ -61,13 +61,23 @@ export default class MeetingScheduler {
         .toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false, hour: '2-digit', minute: '2-digit' })
         .slice(0, 5);
 
-      const meetings = await getUpcomingMeetings(currentISTDate, currentISTTime);
+      let meetings = await getUpcomingMeetings(currentISTDate, currentISTTime);
 
       console.log(`Indian time: ${indianTime}`);
       if (meetings.length > 0) {
-        console.log(`Processing ${meetings.length} upcoming meetings at ${currentISTDate} ${currentISTTime}:`, meetings);
+        // Deduplicate meetings by meetingId
+        const uniqueMeetingIds = new Set();
+        meetings = meetings.filter(meeting => {
+          if (uniqueMeetingIds.has(meeting.meetingId)) {
+            return false;
+          }
+          uniqueMeetingIds.add(meeting.meetingId);
+          return true;
+        });
+
+        console.log(`Processing ${meetings.length} unique upcoming meetings at ${currentISTDate} ${currentISTTime}:`, meetings);
         
-        // Process each meeting
+        // Process each unique meeting
         for (const meeting of meetings) {
           await this.processMeeting(meeting);
         }
