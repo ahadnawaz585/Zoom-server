@@ -1,5 +1,37 @@
+// src/schedule/schedule.ts
 import schedule from 'node-schedule';
 import { getUpcomingMeetings } from '../lib/firebase/schedule';
+import { joinMeeting } from '../controllers/meetingController';
+import { JoinRequest } from '../types';
+
+// Mock response and request implementation for non-HTTP context
+class MockResponse {
+  statusCode: number;
+  responseData: any;
+
+  constructor() {
+    this.statusCode = 200;
+    this.responseData = null;
+  }
+
+  status(code: number) {
+    this.statusCode = code;
+    return this;
+  }
+
+  json(data: any) {
+    this.responseData = data;
+    return this;
+  }
+}
+
+class MockRequest {
+  body: any;
+
+  constructor(body: any) {
+    this.body = body;
+  }
+}
 
 export default class MeetingScheduler {
   private task: schedule.Job;
@@ -19,34 +51,67 @@ export default class MeetingScheduler {
         second: '2-digit',
       });
 
-      // Format current IST date as YYYY-MM-DD (e.g., "2025-04-25")
-      const currentISTDate = today.toLocaleDateString('en-IN', {
-        timeZone: 'Asia/Kolkata',
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-      }).split('/').reverse().join('-'); // Converts DD/MM/YYYY to YYYY-MM-DD
+      const currentISTDate = today
+        .toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' })
+        .split('/')
+        .reverse()
+        .join('-');
 
-      // Format current IST time as HH:MM (24-hour, e.g., "22:15")
-      const currentISTTime = today.toLocaleTimeString('en-IN', {
-        timeZone: 'Asia/Kolkata',
-        hour12: false,
-        hour: '2-digit',
-        minute: '2-digit',
-      }).slice(0, 5); // Extracts "HH:MM"
+      const currentISTTime = today
+        .toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false, hour: '2-digit', minute: '2-digit' })
+        .slice(0, 5);
 
-      // Fetch upcoming meetings for the current date and time
       const meetings = await getUpcomingMeetings(currentISTDate, currentISTTime);
 
-      // Log current time and matching meetings
       console.log(`Indian time: ${indianTime}`);
       if (meetings.length > 0) {
-        console.log(`Upcoming meetings at ${currentISTDate} ${currentISTTime}:`, meetings);
+        console.log(`Processing ${meetings.length} upcoming meetings at ${currentISTDate} ${currentISTTime}:`, meetings);
+        
+        // Process each meeting
+        for (const meeting of meetings) {
+          await this.processMeeting(meeting);
+        }
       } else {
         console.log(`No meetings scheduled at ${currentISTDate} ${currentISTTime}`);
       }
     } catch (error) {
       console.error('Error in scheduler job:', error);
+    }
+  }
+
+  private async processMeeting(meeting: any) {
+    try {
+      console.log(`Processing meeting: ${meeting.meetingId}`);
+      
+      // Create a join request from the meeting data
+      const joinRequest: JoinRequest = {
+        meetingId: meeting.meetingId,
+        password: meeting.password,
+        bots: meeting.bots || [],
+        botCount: meeting.botCount || 0,
+        duration: meeting.duration || 60
+      };
+
+      // Create mock request and response objects
+      const mockReq = new MockRequest({ ...joinRequest });
+      const mockRes = new MockResponse();
+      
+      // Call joinMeeting with the mock objects
+      await joinMeeting(mockReq as any, mockRes as any);
+      
+      // Log the result
+      console.log(`Meeting ${meeting.meetingId} processing result:`, 
+        mockRes.statusCode, 
+        mockRes.responseData
+      );
+      
+      // Optionally update the meeting status in your database
+      // await updateMeetingStatus(meeting.id, 'PROCESSING', mockRes.responseData);
+      
+    } catch (error) {
+      console.error(`Error processing meeting ${meeting.meetingId}:`, error);
+      // Optionally update meeting status to failed
+      // await updateMeetingStatus(meeting.id, 'FAILED', { error: String(error) });
     }
   }
 }
