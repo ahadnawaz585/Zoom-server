@@ -94,13 +94,17 @@ export default class MeetingScheduler {
       console.log(`Processing meeting: ${meeting.meetingId}`);
       
       // Create a join request from the meeting data
+      // Pass the actual bots array from the meeting data
       const joinRequest: JoinRequest = {
         meetingId: meeting.meetingId,
         password: meeting.password,
-        bots: meeting.bots || [],
-        botCount: meeting.botCount || 0,
+        bots: meeting.bots || [], // Use the actual bot objects with their names
+        botCount: 0, // Set to 0 to use only the provided bots array
         duration: meeting.duration || 60
       };
+
+      // Debug log to show the actual bot data being passed
+      console.log(`Using bots data:`, joinRequest.bots.map(bot => bot.name || `Bot-${bot.id}`));
 
       // Create mock request and response objects
       const mockReq = new MockRequest({ ...joinRequest });
