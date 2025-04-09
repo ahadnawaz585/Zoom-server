@@ -43,23 +43,34 @@ export default class MeetingScheduler {
   private async job() {
     try {
       const today = new Date();
-      const indianTime = today.toLocaleTimeString('en-IN', {
+      const indianTime = today
+      .toLocaleTimeString('en-IN', {
         timeZone: 'Asia/Kolkata',
         hour12: true,
         hour: '2-digit',
         minute: '2-digit',
-        second: '2-digit',
-      });
+      })
+      .split(' ')[0];
 
       const currentISTDate = today
-        .toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' })
-        .split('/')
-        .reverse()
-        .join('-');
+      .toLocaleDateString('en-IN', { 
+        timeZone: 'Asia/Kolkata', 
+        year: 'numeric', 
+        month: '2-digit', 
+        day: '2-digit' 
+      })
+      .split('/')
+      .reverse()
+      .join('-');
 
       const currentISTTime = today
-        .toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false, hour: '2-digit', minute: '2-digit' })
-        .slice(0, 5);
+  .toLocaleTimeString('en-IN', { 
+    timeZone: 'Asia/Kolkata', 
+    hour12: false, 
+    hour: '2-digit', 
+    minute: '2-digit' 
+  })
+  .slice(0, 5);
 
       let meetings = await getUpcomingMeetings(currentISTDate, currentISTTime);
 
