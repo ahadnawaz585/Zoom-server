@@ -6,6 +6,16 @@ import { generateSignature } from '../utils/signature';
 import { generateBots } from '../utils/botUtils';
 import { workerScript } from '../utils/workerScript';
 
+// Store active workers with their scheduled termination times
+interface ActiveWorkerInfo {
+  worker: Worker;
+  terminationTimeout: NodeJS.Timeout;
+  startTime: number;
+  duration: number; // in minutes
+}
+
+// Global map to track all active workers across requests
+const globalActiveWorkers = new Map<string, ActiveWorkerInfo>();
 
 export const joinMeeting = async (req: Request, res: Response): Promise<void> => {
   console.log(`[${new Date().toISOString()}] Received join meeting request`);
@@ -19,6 +29,10 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
     res.status(400).json({ error: "Missing required fields" });
     return;
   }
+
+  // Convert duration to minutes if it's not already
+  duration = Math.max(1, Math.floor(duration)); // Ensure minimum 1 minute and integer value
+  console.log(`[${new Date().toISOString()}] Using duration: ${duration} minutes`);
 
   bots = bots || [];
   console.log(`[${new Date().toISOString()}] Initial bot count: ${bots.length}, requested botCount: ${botCount}`);
@@ -72,7 +86,8 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
         optimizedJoin: true, // Flag for worker script to use optimized settings
         disableVideo: true,  // Flag to disable video
         disableAudio: true,  // Flag to disable audio
-        lowResolution: true  // Flag to use low resolution
+        lowResolution: true, // Flag to use low resolution
+        duration: duration * 60 * 1000, // Convert minutes to milliseconds for worker
       });
     });
   }
@@ -122,6 +137,34 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
   const semaphore = new Semaphore(MAX_CONCURRENT_WORKERS);
   const activeWorkers = new Map<string, Worker>();
 
+  // Function to schedule worker termination after duration
+  const scheduleWorkerTermination = (taskId: string, worker: Worker, durationMinutes: number): NodeJS.Timeout => {
+    const durationMs = durationMinutes * 60 * 1000;
+    
+    console.log(`[${new Date().toISOString()}] Scheduling termination for task ${taskId} after ${durationMinutes} minutes`);
+    
+    return setTimeout(() => {
+      try {
+        console.log(`[${new Date().toISOString()}] Duration expired for task ${taskId} - terminating worker`);
+        
+        // Send termination message to worker to allow graceful cleanup
+        worker.postMessage({ type: 'TERMINATE' });
+        
+        // After a short grace period, forcefully terminate if still running
+        setTimeout(() => {
+          if (globalActiveWorkers.has(taskId)) {
+            console.log(`[${new Date().toISOString()}] Force terminating worker for task ${taskId}`);
+            worker.terminate();
+            activeWorkers.delete(taskId);
+            globalActiveWorkers.delete(taskId);
+          }
+        }, 5000); // 5 second grace period for cleanup
+      } catch (error) {
+        console.error(`[${new Date().toISOString()}] Error terminating worker for task ${taskId}: ${error}`);
+      }
+    }, durationMs);
+  };
+
   const executeTask = async (task: Task): Promise<WorkerResult[]> => {
     const taskId = `${task.browserType}-${task.botPair.map(b => b.id).join('-')}`;
     
@@ -148,19 +191,34 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
       });
 
       activeWorkers.set(taskId, worker);
-      console.log(`[${new Date().toISOString()}] Active workers: ${activeWorkers.size}`);
+      
+      // Schedule termination after duration minutes
+      const terminationTimeout = scheduleWorkerTermination(taskId, worker, duration);
+      
+      // Store in global map with termination info
+      globalActiveWorkers.set(taskId, {
+        worker,
+        terminationTimeout,
+        startTime: Date.now(),
+        duration
+      });
+      
+      console.log(`[${new Date().toISOString()}] Active workers: ${activeWorkers.size}, will terminate in ${duration} minutes`);
       let timeoutId: NodeJS.Timeout;
 
       worker.on('message', (result: WorkerResult[]) => {
         clearTimeout(timeoutId);
-        activeWorkers.delete(taskId);
-        console.log(`[${new Date().toISOString()}] Worker completed for ${task.browserType} bots ${task.botPair.map(b => b.name).join(', ')}`);
+        
+        // Don't remove from global active workers map yet - we'll let the duration timer handle that
+        console.log(`[${new Date().toISOString()}] Worker completed initial join for ${task.browserType} bots ${task.botPair.map(b => b.name).join(', ')}`);
+        console.log(`[${new Date().toISOString()}] Bots will remain in meeting for ${duration} minutes`);
         
         const processedResults = result.map(r => {
           return {
             ...r,
             success: true,
             keepOpenOnTimeout: true,
+            scheduledTermination: new Date(Date.now() + duration * 60 * 1000).toISOString(),
             error: r.error ? "Browser tab kept open" : undefined
           };
         });
@@ -172,6 +230,14 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
       worker.on('error', (error) => {
         clearTimeout(timeoutId);
         activeWorkers.delete(taskId);
+        
+        // Clear the termination timeout and remove from global map
+        const workerInfo = globalActiveWorkers.get(taskId);
+        if (workerInfo) {
+          clearTimeout(workerInfo.terminationTimeout);
+          globalActiveWorkers.delete(taskId);
+        }
+        
         console.error(`[${new Date().toISOString()}] Worker error for ${task.browserType} bots ${task.botPair.map(b => b.name).join(', ')}: ${error.stack}`);
         semaphore.release();
         resolve(task.botPair.map(bot => ({
@@ -186,6 +252,14 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
         if (code !== 0) {
           clearTimeout(timeoutId);
           activeWorkers.delete(taskId);
+          
+          // Clear the termination timeout and remove from global map
+          const workerInfo = globalActiveWorkers.get(taskId);
+          if (workerInfo) {
+            clearTimeout(workerInfo.terminationTimeout);
+            globalActiveWorkers.delete(taskId);
+          }
+          
           console.error(`[${new Date().toISOString()}] Worker exited with code ${code} for ${task.browserType} bots ${task.botPair.map(b => b.name).join(', ')}`);
           semaphore.release();
           resolve(task.botPair.map(bot => ({
@@ -199,14 +273,15 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
 
       // Shorter timeout for faster error handling
       timeoutId = setTimeout(() => {
-        console.log(`[${new Date().toISOString()}] Worker main process timeout for ${task.browserType} bots ${task.botPair.map(b => b.name).join(', ')} - keeping active`);
+        console.log(`[${new Date().toISOString()}] Worker main process timeout for ${task.browserType} bots ${task.botPair.map(b => b.name).join(', ')} - keeping active for ${duration} minutes`);
         semaphore.release();
         resolve(task.botPair.map(bot => ({
           success: true,
           botId: bot.id,
           error: "Main process timeout but browser tabs kept open",
           browser: task.browserType,
-          keepOpenOnTimeout: true
+          keepOpenOnTimeout: true,
+          scheduledTermination: new Date(Date.now() + duration * 60 * 1000).toISOString()
         })));
       }, 60000); // Reduced from 600000 (10 min) to 60000 (1 min)
     });
@@ -241,7 +316,7 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
       keptOpenTabs.push(`${r.browser}-${r.botId}`);
     });
     
-    console.log(`[${new Date().toISOString()}] Keeping ${keptOpenTabs.length} tabs open: ${keptOpenTabs.join(', ')}`);
+    console.log(`[${new Date().toISOString()}] Keeping ${keptOpenTabs.length} tabs open for ${duration} minutes: ${keptOpenTabs.join(', ')}`);
     
     const successes = results.filter(r => r.success).length;
     const failures = results.filter(r => !r.success);
@@ -250,6 +325,8 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
       success: successes > 0,
       message: `${successes}/${bots.length} bots processed successfully`,
       keptOpenTabs: keptOpenTabs.length,
+      tabsWillCloseAt: new Date(Date.now() + duration * 60 * 1000).toISOString(),
+      durationMinutes: duration,
       failures,
       browserStats: {
         chromium: {
@@ -267,6 +344,7 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
     };
 
     console.log(`[${new Date().toISOString()}] Request completed: ${response.message}`, JSON.stringify(response.browserStats));
+    console.log(`[${new Date().toISOString()}] Tabs will automatically close at: ${response.tabsWillCloseAt}`);
     res.status(failures.length > 0 ? 207 : 200).json(response);
   } catch (error) {
     console.error(`[${new Date().toISOString()}] Processing error: ${error instanceof Error ? error.stack : String(error)}`);
@@ -279,4 +357,102 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
       }
     });
   }
+};
+
+// Add an endpoint to get status of active workers
+export const getActiveWorkers = (req: Request, res: Response): void => {
+  const activeWorkerData = Array.from(globalActiveWorkers.entries()).map(([taskId, info]) => {
+    const elapsedMinutes = (Date.now() - info.startTime) / (60 * 1000);
+    const remainingMinutes = Math.max(0, info.duration - elapsedMinutes);
+    
+    return {
+      taskId,
+      startTime: new Date(info.startTime).toISOString(),
+      duration: info.duration,
+      elapsedMinutes: parseFloat(elapsedMinutes.toFixed(2)),
+      remainingMinutes: parseFloat(remainingMinutes.toFixed(2)),
+      scheduledTerminationTime: new Date(info.startTime + info.duration * 60 * 1000).toISOString()
+    };
+  });
+  
+  res.status(200).json({
+    activeWorkers: activeWorkerData.length,
+    workers: activeWorkerData
+  });
+};
+
+// Add an endpoint to manually terminate all workers
+export const terminateAllWorkers = (req: Request, res: Response): void => {
+  const count = globalActiveWorkers.size;
+  
+  globalActiveWorkers.forEach((info, taskId) => {
+    try {
+      console.log(`[${new Date().toISOString()}] Manually terminating worker for task ${taskId}`);
+      clearTimeout(info.terminationTimeout);
+      info.worker.postMessage({ type: 'TERMINATE' });
+      
+      // After a short grace period, forcefully terminate if still running
+      setTimeout(() => {
+        if (globalActiveWorkers.has(taskId)) {
+          info.worker.terminate();
+          globalActiveWorkers.delete(taskId);
+        }
+      }, 3000);
+    } catch (error) {
+      console.error(`[${new Date().toISOString()}] Error terminating worker for task ${taskId}: ${error}`);
+    }
+  });
+  
+  res.status(200).json({
+    success: true,
+    message: `Initiated termination of ${count} worker(s)`,
+    terminatedAt: new Date().toISOString()
+  });
+};
+
+// Add functions to help with cleanup during server shutdown
+export const gracefulShutdown = async (): Promise<void> => {
+  console.log(`[${new Date().toISOString()}] Server shutting down, terminating ${globalActiveWorkers.size} workers`);
+  
+  const terminationPromises: Promise<void>[] = [];
+  
+  globalActiveWorkers.forEach((info, taskId) => {
+    const terminationPromise = new Promise<void>((resolve) => {
+      try {
+        clearTimeout(info.terminationTimeout);
+        info.worker.postMessage({ type: 'TERMINATE' });
+        
+        // Set a timeout to force terminate if graceful shutdown doesn't work
+        setTimeout(() => {
+          try {
+            if (globalActiveWorkers.has(taskId)) {
+              info.worker.terminate();
+              globalActiveWorkers.delete(taskId);
+            }
+          } catch (e) {
+            console.error(`[${new Date().toISOString()}] Error in force termination: ${e}`);
+          }
+          resolve();
+        }, 3000);
+        
+        info.worker.on('exit', () => {
+          globalActiveWorkers.delete(taskId);
+          resolve();
+        });
+      } catch (error) {
+        console.error(`[${new Date().toISOString()}] Error during shutdown for task ${taskId}: ${error}`);
+        resolve();
+      }
+    });
+    
+    terminationPromises.push(terminationPromise);
+  });
+  
+  // Wait for all workers to terminate (with a timeout)
+  await Promise.race([
+    Promise.all(terminationPromises),
+    new Promise<void>(resolve => setTimeout(resolve, 10000)) // 10 second max wait
+  ]);
+  
+  console.log(`[${new Date().toISOString()}] Server shutdown complete, terminated workers`);
 };
