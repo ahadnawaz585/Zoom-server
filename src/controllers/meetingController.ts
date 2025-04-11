@@ -45,7 +45,7 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
 
   const origin = process.env.NEXT_PUBLIC_CLIENT_URL || 'https://zoom-bots.vercel.app';
   console.log(`[${new Date().toISOString()}] Using origin: ${origin}`);
-  const signature = generateSignature(meetingId, 0, duration);
+  const signature = await generateSignature(meetingId, 0, duration);
 
   // Use only Chromium for faster performance
   const browserTypes: ('chromium')[] = ['chromium'];
