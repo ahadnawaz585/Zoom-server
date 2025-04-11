@@ -1,11 +1,9 @@
 export const workerScript = `
   const { parentPort, workerData } = require('worker_threads');
-  const { chromium, firefox, webkit } = require('playwright');
+  const { chromium } = require('playwright');
   const { setPriority } = require('os');
   const os = require('os');
 
-  const browserEngines = { chromium, firefox, webkit };
-  
   // Extract system info if provided
   const { systemInfo = { cpuCount: os.cpus().length, highPriority: true } } = workerData;
   
@@ -75,7 +73,7 @@ export const workerScript = `
     origin, 
     signature, 
     browserType,
-    skipJoinIndicator = true, 
+    skipJoinodeficiency = true, 
     keepOpenOnTimeout = true, 
     selectorTimeout = 86400000,
     // Support for new options from controller
@@ -84,96 +82,62 @@ export const workerScript = `
     disableAudio = true,
     lowResolution = true
   }) => {
-    console.log(\`[${new Date().toISOString()}] Worker starting for bots \${botPair.map(b => b.name).join(', ')} with \${browserType}\`);
+    console.log(\`[${new Date().toISOString()}] Worker starting for bots \${botPair.map(b => b.name).join(', ')} with chromium\`);
     console.log(\`[${new Date().toISOString()}] Browser session will run for \${duration/60000} minutes\`);
-    const browserEngine = browserEngines[browserType];
 
-    // Base options for all browsers
+    // Base options for Chromium
     const launchOptions = {
       headless: true,
       timeout: 30000 // Increased timeout for browser launch
     };
 
-    // Apply browser-specific configurations
-    if (browserType === 'chromium') {
-      // Chromium-specific optimizations
-      launchOptions.args = [
-        '--no-sandbox', 
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--no-first-run',
-        '--no-zygote',
-        '--single-process', 
-        '--disable-extensions',
-        '--disable-background-networking',
-        '--disable-default-apps',
-        '--use-fake-device-for-media-stream',
-        '--use-fake-ui-for-media-stream',
-        '--disable-sync',
-        '--disable-translate',
-        '--hide-scrollbars',
-        '--metrics-recording-only',
-        '--mute-audio',
-        '--no-default-browser-check',
-        '--disable-hang-monitor',
-        '--disable-prompt-on-repost',
-        '--disable-client-side-phishing-detection',
-        '--disable-component-update',
-        '--disable-breakpad',
-        '--disable-ipc-flooding-protection',
-        '--disable-renderer-backgrounding',
-        '--force-color-profile=srgb',
-        '--disable-backgrounding-occluded-windows',
-        '--disable-background-timer-throttling'
-      ];
-      
-      // Add additional optimizations for video/audio when requested
-      if (disableVideo) {
-        launchOptions.args.push('--use-fake-device-for-media-stream');
-        launchOptions.args.push('--use-fake-ui-for-media-stream');
-        launchOptions.args.push('--disable-webrtc-hw-encoding');
-        launchOptions.args.push('--disable-webrtc-hw-decoding');
-      }
-      
-      if (lowResolution) {
-        launchOptions.args.push('--force-device-scale-factor=0.5');
-      }
-    } else if (browserType === 'firefox') {
-      // Firefox uses different mechanism for arguments
-      // Only use a minimal set of compatible arguments
-      launchOptions.args = [];
-      
-      // Firefox-specific optimizations through preferences
-      launchOptions.firefoxUserPrefs = {
-        'media.volume_scale': '0.0',
-        'media.navigator.audio.fake_device': 'true',
-        'media.navigator.permission.disabled': true,
-        'media.navigator.streams.fake': true,
-        'media.autoplay.block-webaudio': false,
-        'media.block-autoplay-until-in-foreground': false,
-        'browser.download.panel.shown': false,
-        'browser.download.useDownloadDir': true,
-        'browser.sessionstore.resume_from_crash': false,
-        'browser.shell.checkDefaultBrowser': false,
-        'toolkit.telemetry.enabled': false,
-        'toolkit.telemetry.rejected': true,
-        'toolkit.telemetry.server': '',
-        'datareporting.policy.dataSubmissionEnabled': false,
-        'datareporting.healthreport.uploadEnabled': false,
-        'extensions.autoDisableScopes': 15,
-        'extensions.enabledScopes': 0,
-        'dom.push.enabled': false,
-        'dom.webnotifications.enabled': false,
-        'network.cookie.cookieBehavior': 0
-      };
+    // Chromium-specific optimizations
+    launchOptions.args = [
+      '--no-sandbox', 
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--no-first-run',
+      '--no-zygote',
+      '--single-process', 
+      '--disable-extensions',
+      '--disable-background-networking',
+      '--disable-default-apps',
+      '--disable-sync',
+      '--disable-translate',
+      '--hide-scrollbars',
+      '--metrics-recording-only',
+      '--mute-audio',
+      '--no-default-browser-check',
+      '--disable-hang-monitor',
+      '--disable-prompt-on-repost',
+      '--disable-client-side-phishing-detection',
+      '--disable-component-update',
+      '--disable-breakpad',
+      '--disable-ipc-flooding-protection',
+      '--disable-renderer-backgrounding',
+      '--force-color-profile=srgb',
+      '--disable-backgrounding-occluded-windows',
+      '--disable-background-timer-throttling'
+    ];
+    
+    // Add additional optimizations for video/audio when requested
+    if (disableVideo) {
+      launchOptions.args.push('--use-fake-device-for-media-stream');
+      launchOptions.args.push('--use-fake-ui-for-media-stream');
+      launchOptions.args.push('--disable-webrtc-hw-encoding');
+      launchOptions.args.push('--disable-webrtc-hw-decoding');
+    }
+    
+    if (lowResolution) {
+      launchOptions.args.push('--force-device-scale-factor=0.5');
     }
 
     try {
-      console.log(\`[${new Date().toISOString()}] Launching \${browserType} with optimized settings\`);
-      context = await browserEngine.launchPersistentContext('', launchOptions);
+      console.log(\`[${new Date().toISOString()}] Launching chromium with optimized settings\`);
+      context = await chromium.launchPersistentContext('', launchOptions);
       browser = context.browser();
-      console.log(\`[${new Date().toISOString()}] \${browserType} launched for bots \${botPair.map(b => b.name).join(', ')}\`);
+      console.log(\`[${new Date().toISOString()}] chromium launched for bots \${botPair.map(b => b.name).join(', ')}\`);
 
       // Schedule cleanup after duration
       console.log(\`[${new Date().toISOString()}] Scheduling browser closure after \${duration/60000} minutes\`);
@@ -210,7 +174,7 @@ export const workerScript = `
       console.log(\`[${new Date().toISOString()}] Processing \${botPair.length} bots in parallel\`);
       await Promise.all(botPair.map(async (bot, index) => {
         const page = pages[index];
-        console.log(\`[${new Date().toISOString()}] \${browserType} attempting to join with bot \${bot.name}\`);
+        console.log(\`[${new Date().toISOString()}] chromium attempting to join with bot \${bot.name}\`);
         
         // Add optimized query parameters when optimizedJoin is enabled
         let url = \`\${origin}/meeting?username=\${encodeURIComponent(bot.name)}&meetingId=\${encodeURIComponent(meetingId)}&password=\${encodeURIComponent(password)}&signature=\${encodeURIComponent(signature)}\`;
@@ -247,14 +211,14 @@ export const workerScript = `
                   throw new Error('Meeting join error detected');
                 })
               ]);
-              console.log(\`[${new Date().toISOString()}] \${browserType} bot \${bot.name} joined successfully\`);
+              console.log(\`[${new Date().toISOString()}] chromium bot \${bot.name} joined successfully\`);
             } catch (waitError) {
               console.log(\`[${new Date().toISOString()}] Indicator wait timeout for \${bot.name}: \${waitError.message}\`);
             }
           } else {
             // Just wait a moment to let the page initialize
             await page.waitForTimeout(2000);
-            console.log(\`[${new Date().toISOString()}] \${browserType} bot \${bot.name} navigation complete - skipping join indicator check\`);
+            console.log(\`[${new Date().toISOString()}] chromium bot \${bot.name} navigation complete - skipping join indicator check\`);
           }
           
           // Run some basic interaction to ensure the meeting connection is established
@@ -312,21 +276,21 @@ export const workerScript = `
           results.push({ 
             success: true, 
             botId: bot.id, 
-            browser: browserType,
+            browser: 'chromium',
             keepOpenOnTimeout: true,
             scheduledTermination: new Date(Date.now() + duration).toISOString()
           });
           
           // Important: Don't close the page - leave it open
         } catch (error) {
-          console.log(\`[${new Date().toISOString()}] \${browserType} bot \${bot.name} encountered issue: \${error.message}\`);
+          console.log(\`[${new Date().toISOString()}] chromium bot \${bot.name} encountered issue: \${error.message}\`);
           
           // Even on error, if keepOpenOnTimeout is true, mark as success and keep page open
           if (keepOpenOnTimeout) {
             results.push({ 
               success: true, 
               botId: bot.id, 
-              browser: browserType,
+              browser: 'chromium',
               error: 'Tab kept open despite error: ' + error.message,
               keepOpenOnTimeout: true,
               scheduledTermination: new Date(Date.now() + duration).toISOString()
@@ -337,7 +301,7 @@ export const workerScript = `
               success: false, 
               botId: bot.id, 
               error: error.message, 
-              browser: browserType 
+              browser: 'chromium'
             });
             await page.close().catch(() => {}); // Ignore close errors
           }
@@ -349,7 +313,7 @@ export const workerScript = `
         keepAliveInterval = setInterval(() => {
           // Report that browsers are still alive
           const remainingMinutes = ((Date.now() + duration) - Date.now()) / 60000;
-          console.log(\`[${new Date().toISOString()}] \${browserType} keeping browsers alive for \${botPair.map(b => b.name).join(', ')}. Approximately \${remainingMinutes.toFixed(1)} minutes remaining\`);
+          console.log(\`[${new Date().toISOString()}] chromium keeping browsers alive for \${botPair.map(b => b.name).join(', ')}. Approximately \${remainingMinutes.toFixed(1)} minutes remaining\`);
         }, 60000); // Log every minute
         
         // Ensure interval doesn't keep Node.js process alive indefinitely
@@ -357,10 +321,10 @@ export const workerScript = `
       }
 
       // Don't close the context or browser - leave everything open
-      console.log(\`[${new Date().toISOString()}] \${browserType} keeping browser open for bots \${botPair.map(b => b.name).join(', ')} for \${duration/60000} minutes\`);
+      console.log(\`[${new Date().toISOString()}] chromium keeping browser open for bots \${botPair.map(b => b.name).join(', ')} for \${duration/60000} minutes\`);
       return results;
     } catch (error) {
-      console.error(\`[${new Date().toISOString()}] \${browserType} launch failed: \${error.message}\`);
+      console.error(\`[${new Date().toISOString()}] chromium launch failed: \${error.message}\`);
       // Clean up any resources that might have been created
       await cleanup('Launch error').catch(() => {});
       
@@ -368,7 +332,7 @@ export const workerScript = `
         success: false, 
         botId: bot.id, 
         error: 'Browser launch failed: ' + error.message, 
-        browser: browserType 
+        browser: 'chromium'
       }));
     }
   };
@@ -388,7 +352,7 @@ export const workerScript = `
         success: false,
         botId: bot.id,
         error: 'Worker fatal error: ' + error.message,
-        browser: workerData.browserType
+        browser: 'chromium'
       })));
     });
 `;
