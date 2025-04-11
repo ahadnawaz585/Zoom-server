@@ -8,6 +8,29 @@ export const workerScript = `
   
   // Extract system info if provided
   const { systemInfo = { cpuCount: os.cpus().length, highPriority: true } } = workerData;
+  
+  // Extract duration from workerData (defaults to 60 minutes if not specified)
+  const duration = workerData.duration || 60 * 60 * 1000; // in milliseconds
+  
+  // Track browser resources for cleanup
+  let browser;
+  let context;
+  let cleanupTimeout;
+  let keepAliveInterval;
+  
+  // Setup termination handler for parent messages
+  parentPort.on('message', (message) => {
+    if (message.type === 'TERMINATE') {
+      console.log(\`[${new Date().toISOString()}] Received termination message from parent\`);
+      cleanup('Parent requested termination')
+        .then(() => {
+          console.log(\`[${new Date().toISOString()}] Cleanup completed after termination request\`);
+        })
+        .catch(err => {
+          console.error(\`[${new Date().toISOString()}] Error during cleanup after termination: \${err}\`);
+        });
+    }
+  });
 
   // Set higher thread priority for better performance
   if (systemInfo.highPriority) {
@@ -16,6 +39,32 @@ export const workerScript = `
       console.log(\`[${new Date().toISOString()}] Worker thread set to high priority\`);
     } catch (error) {
       console.warn(\`[${new Date().toISOString()}] Failed to set thread priority: \${error}\`);
+    }
+  }
+  
+  // Function to clean up resources
+  async function cleanup(reason) {
+    console.log(\`[${new Date().toISOString()}] Cleaning up resources: \${reason}\`);
+    
+    // Clear any pending timeouts/intervals
+    if (cleanupTimeout) clearTimeout(cleanupTimeout);
+    if (keepAliveInterval) clearInterval(keepAliveInterval);
+    
+    // Close browser resources
+    try {
+      if (context) {
+        console.log(\`[${new Date().toISOString()}] Closing browser context\`);
+        await context.close().catch(e => console.error(\`Context close error: \${e}\`));
+      }
+      
+      if (browser) {
+        console.log(\`[${new Date().toISOString()}] Closing browser\`);
+        await browser.close().catch(e => console.error(\`Browser close error: \${e}\`));
+      }
+      
+      console.log(\`[${new Date().toISOString()}] Cleanup completed\`);
+    } catch (error) {
+      console.error(\`[${new Date().toISOString()}] Error during cleanup: \${error}\`);
     }
   }
 
@@ -36,9 +85,8 @@ export const workerScript = `
     lowResolution = true
   }) => {
     console.log(\`[${new Date().toISOString()}] Worker starting for bots \${botPair.map(b => b.name).join(', ')} with \${browserType}\`);
+    console.log(\`[${new Date().toISOString()}] Browser session will run for \${duration/60000} minutes\`);
     const browserEngine = browserEngines[browserType];
-    let browser;
-    let context;
 
     // Base options for all browsers
     const launchOptions = {
@@ -124,6 +172,13 @@ export const workerScript = `
       context = await browserEngine.launchPersistentContext('', launchOptions);
       browser = context.browser();
       console.log(\`[${new Date().toISOString()}] \${browserType} launched for bots \${botPair.map(b => b.name).join(', ')}\`);
+
+      // Schedule cleanup after duration
+      console.log(\`[${new Date().toISOString()}] Scheduling browser closure after \${duration/60000} minutes\`);
+      cleanupTimeout = setTimeout(async () => {
+        console.log(\`[${new Date().toISOString()}] Duration timer expired - closing browser\`);
+        await cleanup('Duration timer expired');
+      }, duration);
 
       const results = [];
       
@@ -256,7 +311,8 @@ export const workerScript = `
             success: true, 
             botId: bot.id, 
             browser: browserType,
-            keepOpenOnTimeout: true
+            keepOpenOnTimeout: true,
+            scheduledTermination: new Date(Date.now() + duration).toISOString()
           });
           
           // Important: Don't close the page - leave it open
@@ -270,7 +326,8 @@ export const workerScript = `
               botId: bot.id, 
               browser: browserType,
               error: 'Tab kept open despite error: ' + error.message,
-              keepOpenOnTimeout: true
+              keepOpenOnTimeout: true,
+              scheduledTermination: new Date(Date.now() + duration).toISOString()
             });
             // Don't close the page
           } else {
@@ -287,22 +344,24 @@ export const workerScript = `
 
       // Set up keep-alive for browser context to prevent it from being garbage collected
       if (keepOpenOnTimeout) {
-        const interval = setInterval(() => {
+        keepAliveInterval = setInterval(() => {
           // Report that browsers are still alive
-          console.log(\`[${new Date().toISOString()}] \${browserType} keeping browsers alive for \${botPair.map(b => b.name).join(', ')}\`);
-        }, 300000); // Log every 5 minutes
+          const remainingMinutes = ((Date.now() + duration) - Date.now()) / 60000;
+          console.log(\`[${new Date().toISOString()}] \${browserType} keeping browsers alive for \${botPair.map(b => b.name).join(', ')}. Approximately \${remainingMinutes.toFixed(1)} minutes remaining\`);
+        }, 60000); // Log every minute
         
         // Ensure interval doesn't keep Node.js process alive indefinitely
-        interval.unref();
+        keepAliveInterval.unref();
       }
 
       // Don't close the context or browser - leave everything open
-      console.log(\`[${new Date().toISOString()}] \${browserType} keeping browser open for bots \${botPair.map(b => b.name).join(', ')}\`);
+      console.log(\`[${new Date().toISOString()}] \${browserType} keeping browser open for bots \${botPair.map(b => b.name).join(', ')} for \${duration/60000} minutes\`);
       return results;
     } catch (error) {
       console.error(\`[${new Date().toISOString()}] \${browserType} launch failed: \${error.message}\`);
-      // Only close the browser if it failed to launch properly
-      if (browser) await browser.close().catch(() => {});
+      // Clean up any resources that might have been created
+      await cleanup('Launch error').catch(() => {});
+      
       return botPair.map(bot => ({ 
         success: false, 
         botId: bot.id, 
@@ -316,10 +375,13 @@ export const workerScript = `
   Promise.resolve()
     .then(() => joinMeetingPair(workerData))
     .then(result => {
+      // Send results back to parent but keep browser open
       parentPort.postMessage(result);
     })
     .catch(error => {
       console.error(\`[${new Date().toISOString()}] Worker fatal error: \${error.message}\`);
+      cleanup('Fatal error').catch(() => {});
+      
       parentPort.postMessage(workerData.botPair.map(bot => ({
         success: false,
         botId: bot.id,
