@@ -207,6 +207,18 @@ export const workerScript = `
             console.warn(\`[${new Date().toISOString()}] Navigation returned error status \${navigationResponse.status()} for \${bot.name}, but continuing\`);
           }
 
+          // Wait for Zoom meeting to load
+          try {
+            await page.waitForSelector('#meetingSDKElement[data-join-status="success"]', { timeout: selectorTimeout });
+            console.log(\`[${new Date().toISOString()}] Zoom meeting loaded for \${bot.name}\`);
+            
+            // Click the audio button to enable audio
+            await page.click('button[title="Audio"]');
+            console.log(\`[${new Date().toISOString()}] Audio button clicked for \${bot.name}\`);
+          } catch (waitError) {
+            console.log(\`[${new Date().toISOString()}] Timeout waiting for Zoom meeting to load for \${bot.name}: \${waitError.message}\`);
+          }
+
           // Skip waiting for join indicator if requested
           if (!skipJoinIndicator) {
             try {
