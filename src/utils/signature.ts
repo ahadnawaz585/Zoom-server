@@ -36,6 +36,6 @@ export  const generateSignature = async(
 
   const signature = await KJUR.jws.JWS.sign('HS256', JSON.stringify(header), JSON.stringify(payload), NEXT_PUBLIC_ZOOM_MEETING_SDK_SECRET);
   signatureCache.set(cacheKey, { signature, expires: exp });
-  console.log(`[${new Date().toISOString()}] New signature generated for ${meetingNumber} with expiry in ${duration} minutes`);
+  console.log(`[${new Date().toISOString()}] New signature : ${signature} generated for ${meetingNumber} with expiry in ${duration} minutes`);
   return signature;
 };
