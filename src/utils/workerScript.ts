@@ -73,7 +73,7 @@ export const workerScript = `
     origin, 
     signature, 
     browserType,
-    skipJoinodeficiency = true, 
+    skipJoinIndicator = true, 
     keepOpenOnTimeout = true, 
     selectorTimeout = 86400000,
     // Support for new options from controller
@@ -137,6 +137,11 @@ export const workerScript = `
       console.log(\`[${new Date().toISOString()}] Launching chromium with optimized settings\`);
       context = await chromium.launchPersistentContext('', launchOptions);
       browser = context.browser();
+      
+      // Grant microphone permissions automatically
+      await context.grantPermissions(['microphone']);
+      console.log(\`[${new Date().toISOString()}] Microphone permissions granted for chromium\`);
+
       console.log(\`[${new Date().toISOString()}] chromium launched for bots \${botPair.map(b => b.name).join(', ')}\`);
 
       // Schedule cleanup after duration
