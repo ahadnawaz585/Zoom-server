@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import { Worker } from 'worker_threads';
-import { setPriority, cpus } from 'os';
+import { setPriority, cpus, freemem, totalmem } from 'os';
 import { Bot, JoinRequest, Task, WorkerResult } from '../types';
 import { generateSignature } from '../utils/signature';
 import { generateBots } from '../utils/botUtils';
@@ -18,6 +18,62 @@ interface ActiveWorkerInfo {
 // Global map to track all active workers across requests
 const globalActiveWorkers = new Map<string, ActiveWorkerInfo>();
 
+// Add system metrics for better resource management
+interface SystemMetrics {
+  totalWorkers: number;
+  totalActiveBots: number;
+  lastChecked: number;
+  memoryUsage: number;
+  cpuLoad: number;
+}
+
+const systemMetrics: SystemMetrics = {
+  totalWorkers: 0,
+  totalActiveBots: 0,
+  lastChecked: Date.now(),
+  memoryUsage: 0,
+  cpuLoad: 0
+};
+
+// Function to update system metrics
+const updateSystemMetrics = (): void => {
+  systemMetrics.totalWorkers = globalActiveWorkers.size;
+  systemMetrics.totalActiveBots = Array.from(globalActiveWorkers.values()).reduce((sum, info) => sum + info.botCount, 0);
+  systemMetrics.lastChecked = Date.now();
+  systemMetrics.memoryUsage = 1 - (freemem() / totalmem());
+  // CPU load estimation based on active workers and available cores
+  const cpuCount = cpus().length;
+  systemMetrics.cpuLoad = Math.min(1, systemMetrics.totalWorkers / (cpuCount * 2));
+};
+
+// Function to check if system can handle more workers
+const canHandleMoreWorkers = (requestedBotCount: number): boolean => {
+  updateSystemMetrics();
+  
+  // If memory usage is over 85%, reject new requests
+  if (systemMetrics.memoryUsage > 0.85) {
+    console.warn(`[${new Date().toISOString()}] System memory usage high (${(systemMetrics.memoryUsage * 100).toFixed(1)}%) - rejecting new worker requests`);
+    return false;
+  }
+  
+  // If estimated CPU load is over 90%, reject new requests
+  if (systemMetrics.cpuLoad > 0.9) {
+    console.warn(`[${new Date().toISOString()}] System CPU load high (${(systemMetrics.cpuLoad * 100).toFixed(1)}%) - rejecting new worker requests`);
+    return false;
+  }
+  
+  // Calculate total bots after this request
+  const totalBotsAfterRequest = systemMetrics.totalActiveBots + requestedBotCount;
+  const maxSystemBots = parseInt(process.env.MAX_SYSTEM_BOTS || '1000');
+  
+  if (totalBotsAfterRequest > maxSystemBots) {
+    console.warn(`[${new Date().toISOString()}] System would exceed max bot limit (${totalBotsAfterRequest}/${maxSystemBots}) - rejecting request`);
+    return false;
+  }
+  
+  return true;
+}
+
 export const joinMeeting = async (req: Request, res: Response): Promise<void> => {
   console.log(`[${new Date().toISOString()}] Received join meeting request`);
   const body = req.body as JoinRequest;
@@ -25,7 +81,7 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
   
   // Configuration options with sensible defaults
   const config = {
-    maxBotsPerWorker: parseInt(process.env.MAX_BOTS_PER_WORKER || '6'), // Configurable batch size
+    maxBotsPerWorker: parseInt(process.env.MAX_BOTS_PER_WORKER || '10'), // Hard limit of 10 bots per worker
     maxConcurrentWorkers: parseInt(process.env.MAX_CONCURRENT_WORKERS || '50'),
     minBotsPerWorker: parseInt(process.env.MIN_BOTS_PER_WORKER || '1'), // For smaller batches
     workerTimeout: parseInt(process.env.WORKER_TIMEOUT || '60000'), // 1 minute timeout for worker to report back
@@ -58,6 +114,22 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
     return;
   }
 
+  // Check if system can handle this request
+  const totalBotsRequested = bots.length;
+  if (!canHandleMoreWorkers(totalBotsRequested)) {
+    console.error(`[${new Date().toISOString()}] System capacity exceeded - rejecting request for ${totalBotsRequested} bots`);
+    res.status(503).json({ 
+      error: "System at capacity", 
+      message: "The system is currently handling too many bots. Please try again later or with fewer bots.",
+      currentLoad: {
+        totalActiveBots: systemMetrics.totalActiveBots,
+        memoryUsage: `${(systemMetrics.memoryUsage * 100).toFixed(1)}%`,
+        cpuLoad: `${(systemMetrics.cpuLoad * 100).toFixed(1)}%`
+      }
+    });
+    return;
+  }
+
   const origin = process.env.NEXT_PUBLIC_CLIENT_URL || 'https://zoom-bots.vercel.app';
   console.log(`[${new Date().toISOString()}] Using origin: ${origin}`);
   const signature = await generateSignature(meetingId, 0, duration);
@@ -68,33 +140,19 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
   // Shuffle bots for random distribution
   const shuffledBots = [...bots].sort(() => Math.random() - 0.5);
   
-  // Calculate optimal batch size based on total bots
-  const totalBots = shuffledBots.length;
-  const cpuCount = cpus().length;
+  // Calculate optimal batch size, strictly enforcing max 10 bots per worker
+  const STRICT_MAX_BOTS_PER_WORKER = Math.min(config.maxBotsPerWorker, 10); // Enforce hard limit of 10 bots max
   
-  // Adaptive batch sizing algorithm:
-  // - For smaller sets (< 4 bots), just use one bot per worker
-  // - For medium sets (4-20 bots), use 2-4 bots per worker
-  // - For larger sets (>20 bots), aim for maxBotsPerWorker (6 by default)
-  let optimalBotsPerWorker = config.maxBotsPerWorker;
-  
-  if (totalBots < 4) {
-    optimalBotsPerWorker = config.minBotsPerWorker; // Use 1 bot per worker for very small groups
-  } else if (totalBots <= 20) {
-    // For medium groups, find a divisor that makes sense
-    optimalBotsPerWorker = Math.min(4, Math.ceil(totalBots / Math.ceil(totalBots / 4)));
-  }
-  
-  // Create batches based on calculated optimal size
+  // Create batches with a fixed size of STRICT_MAX_BOTS_PER_WORKER (or less for the last batch)
   const botBatches: Bot[][] = [];
-  for (let i = 0; i < shuffledBots.length; i += optimalBotsPerWorker) {
-    const batch = shuffledBots.slice(i, Math.min(i + optimalBotsPerWorker, shuffledBots.length));
+  for (let i = 0; i < shuffledBots.length; i += STRICT_MAX_BOTS_PER_WORKER) {
+    const batch = shuffledBots.slice(i, Math.min(i + STRICT_MAX_BOTS_PER_WORKER, shuffledBots.length));
     botBatches.push(batch);
   }
   
   // Create tasks from the batches
   const tasks: Task[] = botBatches.map(batch => ({
-    botPair: batch, // Now contains optimal number of bots
+    botPair: batch, // Now contains max 10 bots
     meetingId,
     password,
     origin,
@@ -112,16 +170,23 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
   }));
 
   // Log bot distribution
-  console.log(`[${new Date().toISOString()}] Created ${tasks.length} bot batches with ${optimalBotsPerWorker} bots per batch (optimal)`);
-  console.log(`[${new Date().toISOString()}] Total bots: ${totalBots}, Batches: ${botBatches.length}`);
+  console.log(`[${new Date().toISOString()}] Created ${tasks.length} bot batches with maximum ${STRICT_MAX_BOTS_PER_WORKER} bots per batch`);
+  console.log(`[${new Date().toISOString()}] Total bots: ${totalBotsRequested}, Batches: ${botBatches.length}`);
 
-  // Calculate optimal number of concurrent workers
+  // Calculate optimal number of concurrent workers based on system resources
+  const cpuCount = cpus().length;
+  const systemLoad = systemMetrics.cpuLoad;
+  
+  // Dynamically adjust worker concurrency based on current system load
+  const availableConcurrency = Math.floor(cpuCount * 2 * (1 - systemLoad) * 0.9); // Leave 10% headroom
+  
   const MAX_CONCURRENT_WORKERS = Math.min(
-    config.maxConcurrentWorkers, 
-    Math.max(cpuCount * 2, tasks.length)
+    config.maxConcurrentWorkers,
+    Math.max(1, availableConcurrency), // At least 1 worker
+    tasks.length // Don't exceed number of tasks
   );
   
-  console.log(`[${new Date().toISOString()}] Starting execution with maximum parallelism: ${MAX_CONCURRENT_WORKERS} concurrent workers`);
+  console.log(`[${new Date().toISOString()}] Starting execution with adaptive parallelism: ${MAX_CONCURRENT_WORKERS} concurrent workers (system load: ${(systemLoad * 100).toFixed(1)}%)`);
 
   // Create a semaphore for controlling concurrency
   class Semaphore {
@@ -176,6 +241,7 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
             worker.terminate();
             activeWorkers.delete(taskId);
             globalActiveWorkers.delete(taskId);
+            updateSystemMetrics(); // Update metrics after worker termination
           }
         }, config.gracePeriod);
       } catch (error) {
@@ -223,6 +289,9 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
         botCount: task.botPair.length
       });
       
+      // Update system metrics after adding new worker
+      updateSystemMetrics();
+      
       console.log(`[${new Date().toISOString()}] Active workers: ${activeWorkers.size}, will terminate in ${duration} minutes`);
       let timeoutId: NodeJS.Timeout;
 
@@ -258,6 +327,9 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
           globalActiveWorkers.delete(taskId);
         }
         
+        // Update system metrics after removing worker
+        updateSystemMetrics();
+        
         console.error(`[${new Date().toISOString()}] Worker error for ${task.botPair.length} ${task.browserType} bots: ${error.stack}`);
         semaphore.release();
         resolve(task.botPair.map(bot => ({
@@ -279,6 +351,9 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
             clearTimeout(workerInfo.terminationTimeout);
             globalActiveWorkers.delete(taskId);
           }
+          
+          // Update system metrics after removing worker
+          updateSystemMetrics();
           
           console.error(`[${new Date().toISOString()}] Worker exited with code ${code} for ${task.botPair.length} ${task.browserType} bots`);
           semaphore.release();
@@ -341,6 +416,10 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
     const successes = results.filter(r => r.success).length;
     const failures = results.filter(r => !r.success);
     const startTime = Date.now();
+
+    // Update system metrics after completing all tasks
+    updateSystemMetrics();
+    
     const response = {
       success: successes > 0,
       message: `${successes}/${bots.length} bots processed successfully`,
@@ -350,7 +429,7 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
       failures,
       workerStats: {
         totalWorkers: tasks.length,
-        botsPerWorker: optimalBotsPerWorker,
+        maxBotsPerWorker: STRICT_MAX_BOTS_PER_WORKER,
         batchDistribution: tasks.map(t => t.botPair.length).join(',')
       },
       browserStats: {
@@ -365,6 +444,12 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
         maxConcurrentWorkers: MAX_CONCURRENT_WORKERS,
         cpuCount,
         executionTimeSeconds: (Date.now() - startTime) / 1000
+      },
+      systemLoad: {
+        totalActiveBots: systemMetrics.totalActiveBots,
+        activeWorkers: systemMetrics.totalWorkers,
+        memoryUsage: `${(systemMetrics.memoryUsage * 100).toFixed(1)}%`,
+        cpuLoad: `${(systemMetrics.cpuLoad * 100).toFixed(1)}%`
       }
     };
 
@@ -378,14 +463,22 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
       details: error instanceof Error ? error.message : String(error),
       systemInfo: {
         cpuCount,
-        attemptedConcurrency: MAX_CONCURRENT_WORKERS
+        attemptedConcurrency: MAX_CONCURRENT_WORKERS,
+        systemLoad: {
+          totalActiveBots: systemMetrics.totalActiveBots,
+          memoryUsage: `${(systemMetrics.memoryUsage * 100).toFixed(1)}%`,
+          cpuLoad: `${(systemMetrics.cpuLoad * 100).toFixed(1)}%`
+        }
       }
     });
   }
 };
 
-// Add an endpoint to get status of active workers
+// Add an endpoint to get status of active workers with enhanced metrics
 export const getActiveWorkers = (req: Request, res: Response): void => {
+  // Update system metrics before responding
+  updateSystemMetrics();
+  
   const activeWorkerData = Array.from(globalActiveWorkers.entries()).map(([taskId, info]) => {
     const elapsedMinutes = (Date.now() - info.startTime) / (60 * 1000);
     const remainingMinutes = Math.max(0, info.duration - elapsedMinutes);
@@ -401,12 +494,14 @@ export const getActiveWorkers = (req: Request, res: Response): void => {
     };
   });
   
-  // Calculate total bots in active sessions
-  const totalActiveBots = activeWorkerData.reduce((sum, worker) => sum + worker.botCount, 0);
-  
   res.status(200).json({
     activeWorkers: activeWorkerData.length,
-    totalActiveBots,
+    totalActiveBots: systemMetrics.totalActiveBots,
+    systemMetrics: {
+      memoryUsage: `${(systemMetrics.memoryUsage * 100).toFixed(1)}%`,
+      cpuLoad: `${(systemMetrics.cpuLoad * 100).toFixed(1)}%`,
+      lastUpdated: new Date(systemMetrics.lastChecked).toISOString()
+    },
     workers: activeWorkerData
   });
 };
@@ -427,6 +522,7 @@ export const terminateAllWorkers = (req: Request, res: Response): void => {
         if (globalActiveWorkers.has(taskId)) {
           info.worker.terminate();
           globalActiveWorkers.delete(taskId);
+          updateSystemMetrics(); // Update metrics after removing worker
         }
       }, 3000);
     } catch (error) {

@@ -15,6 +15,7 @@ export const workerScript = `
   let context;
   let cleanupTimeout;
   let keepAliveInterval;
+  let pages = [];
   
   // Setup termination handler for parent messages
   parentPort.on('message', (message) => {
@@ -50,6 +51,17 @@ export const workerScript = `
     
     // Close browser resources
     try {
+      // Close all pages first
+      for (const page of pages) {
+        try {
+          if (page && !page.isClosed()) {
+            await page.close().catch(e => console.error(\`Page close error: \${e}\`));
+          }
+        } catch (e) {
+          console.error(\`[${new Date().toISOString()}] Error closing page: \${e}\`);
+        }
+      }
+      
       if (context) {
         console.log(\`[${new Date().toISOString()}] Closing browser context\`);
         await context.close().catch(e => console.error(\`Context close error: \${e}\`));
@@ -64,6 +76,31 @@ export const workerScript = `
     } catch (error) {
       console.error(\`[${new Date().toISOString()}] Error during cleanup: \${error}\`);
     }
+  }
+
+  // Memory optimization function - force garbage collection if available
+  function optimizeMemory() {
+    try {
+      if (global.gc) {
+        global.gc();
+        console.log(\`[${new Date().toISOString()}] Forced garbage collection\`);
+      }
+    } catch (e) {
+      // Ignore if gc is not available
+    }
+  }
+
+  // Calculate resource limits based on bot count
+  function calculateResourceLimits(botCount) {
+    // Memory parameters based on bot count
+    return {
+      // Limit the memory usage based on the number of bots
+      maxMemoryMB: 512 + (botCount * 50),
+      // Limit concurrent connections per domain
+      maxConcurrentConnections: Math.max(3, Math.min(10, botCount)),
+      // Response size limit
+      downloadLimit: 1024 * 1024 * 3, // 3MB
+    };
   }
 
   const joinMeetingPair = async ({ 
@@ -82,16 +119,30 @@ export const workerScript = `
     disableAudio = true,
     lowResolution = true
   }) => {
-    console.log(\`[${new Date().toISOString()}] Worker starting for bots \${botPair.map(b => b.name).join(', ')} with chromium\`);
+    console.log(\`[${new Date().toISOString()}] Worker starting for \${botPair.length} bots with chromium\`);
     console.log(\`[${new Date().toISOString()}] Browser session will run for \${duration/60000} minutes\`);
+
+    // Safety check - ensure we don't exceed 10 bots per worker
+    const maxBotsPerWorker = 10;
+    if (botPair.length > maxBotsPerWorker) {
+      console.warn(\`[${new Date().toISOString()}] Worker received \${botPair.length} bots, which exceeds the maximum of \${maxBotsPerWorker}\`);
+      // Truncate the list to maximum allowed
+      botPair = botPair.slice(0, maxBotsPerWorker);
+      console.log(\`[${new Date().toISOString()}] Proceeding with first \${maxBotsPerWorker} bots only\`);
+    }
+
+    // Calculate resource limits based on bot count
+    const resourceLimits = calculateResourceLimits(botPair.length);
 
     // Base options for Chromium
     const launchOptions = {
       headless: true,
-      timeout: 30000 // Increased timeout for browser launch
+      timeout: 30000, // Increased timeout for browser launch
+      // Use a shared context to save memory
+      userDataDir: '', // Use empty string for in-memory data dir
     };
 
-    // Chromium-specific optimizations
+    // Add memory limits based on bot count
     launchOptions.args = [
       '--no-sandbox', 
       '--disable-setuid-sandbox',
@@ -99,7 +150,8 @@ export const workerScript = `
       '--disable-gpu',
       '--no-first-run',
       '--no-zygote',
-      '--single-process', 
+      // Use process per site instead of process per tab to save memory
+      '--process-per-site',
       '--disable-extensions',
       '--disable-background-networking',
       '--disable-default-apps',
@@ -118,7 +170,10 @@ export const workerScript = `
       '--disable-renderer-backgrounding',
       '--force-color-profile=srgb',
       '--disable-backgrounding-occluded-windows',
-      '--disable-background-timer-throttling'
+      '--disable-background-timer-throttling',
+      // Memory-specific flags
+      \`--js-flags=--max-old-space-size=\${resourceLimits.maxMemoryMB}\`,
+      \`--memory-pressure-off\`,
     ];
     
     // Add additional optimizations for video/audio when requested
@@ -134,15 +189,18 @@ export const workerScript = `
     }
 
     try {
-      console.log(\`[${new Date().toISOString()}] Launching chromium with optimized settings\`);
+      console.log(\`[${new Date().toISOString()}] Launching chromium with optimized settings for \${botPair.length} bots\`);
       context = await chromium.launchPersistentContext('', launchOptions);
       browser = context.browser();
+
+      // Optimize memory usage right after browser launch
+      optimizeMemory();
       
       // Grant microphone permissions automatically
       await context.grantPermissions(['microphone']);
       console.log(\`[${new Date().toISOString()}] Microphone permissions granted for chromium\`);
 
-      console.log(\`[${new Date().toISOString()}] chromium launched for bots \${botPair.map(b => b.name).join(', ')}\`);
+      console.log(\`[${new Date().toISOString()}] chromium launched for \${botPair.length} bots\`);
 
       // Schedule cleanup after duration
       console.log(\`[${new Date().toISOString()}] Scheduling browser closure after \${duration/60000} minutes\`);
@@ -153,104 +211,208 @@ export const workerScript = `
 
       const results = [];
       
-      // Instead of loading individual bot pages, create a single page with all bots
-      console.log(\`[${new Date().toISOString()}] Creating a single page for all bots\`);
-      const page = await context.newPage();
+      // For better resource management, decide whether to use a single page or multiple pages
+      // based on bot count - for small numbers of bots (<=3), use separate pages
+      // for larger numbers, use a single page with multiple bots
+      const useSinglePage = botPair.length > 3;
       
-      // Configure page for performance
-      // Disable unnecessary features
-      await page.route('**/*.{png,jpg,jpeg,gif,webp,css,woff,woff2,svg,ico}', route => {
-        return route.abort();
-      });
-      
-      // Block analytics, ads and other unnecessary requests
-      await page.route(/google-analytics|googletagmanager|analytics|facebook|twitter|hotjar/, route => {
-        return route.abort();
-      });
-      
-      // Set low-res viewport to reduce resource usage
-      const viewportWidth = lowResolution ? 1280 : 1600;
-      const viewportHeight = lowResolution ? 720 : 900;
-      await page.setViewportSize({ width: viewportWidth, height: viewportHeight });
-
-      try {
-        console.log(\`[${new Date().toISOString()}] chromium attempting to join with multiple bots\`);
+      if (useSinglePage) {
+        console.log(\`[${new Date().toISOString()}] Using single page approach for \${botPair.length} bots\`);
+        const page = await context.newPage();
+        pages.push(page);
         
-        // Create usernames parameter by joining all bot names
-        const usernamesParam = botPair.map(bot => encodeURIComponent(bot.name)).join(',');
-        
-        // Add optimized query parameters when optimizedJoin is enabled
-        let url = \`\${origin}/meetings?usernames=\${usernamesParam}&meetingId=\${encodeURIComponent(meetingId)}&password=\${encodeURIComponent(password)}&signature=\${encodeURIComponent(signature)}\`;
-        
-        if (optimizedJoin) {
-          url += \`&optimized=true\`;
-          if (disableVideo) url += \`&noVideo=true\`;
-          if (disableAudio) url += \`&noAudio=true\`;
-          if (lowResolution) url += \`&lowRes=true\`;
-        }
-        
-        console.log(\`[${new Date().toISOString()}] Navigating to: \${url}\`);
-        
-        // Set shorter timeouts for navigation but handle gracefully
-        const navigationResponse = await page.goto(url, { 
-          waitUntil: 'domcontentloaded', // Use faster domcontentloaded instead of load
-          timeout: 30000 
-        }).catch(error => {
-          console.log(\`[${new Date().toISOString()}] Navigation initial timeout for multiple bots, continuing anyway: \${error.message}\`);
-          return null; // Return null but continue execution
+        // Configure page for performance
+        // Disable unnecessary features
+        await page.route('**/*.{png,jpg,jpeg,gif,webp,css,woff,woff2,svg,ico}', route => {
+          return route.abort();
         });
         
-        if (navigationResponse && navigationResponse.status() >= 400) {
-          console.warn(\`[${new Date().toISOString()}] Navigation returned error status \${navigationResponse.status()} for multiple bots, but continuing\`);
-        }
+        // Block analytics, ads and other unnecessary requests
+        await page.route(/google-analytics|googletagmanager|analytics|facebook|twitter|hotjar/, route => {
+          return route.abort();
+        });
+        
+        // Set low-res viewport to reduce resource usage
+        const viewportWidth = lowResolution ? 800 : 1280;
+        const viewportHeight = lowResolution ? 600 : 720;
+        await page.setViewportSize({ width: viewportWidth, height: viewportHeight });
 
-        // Wait for the grid of iframes to load
         try {
-          await page.waitForSelector('iframe', { timeout: selectorTimeout });
-          console.log(\`[${new Date().toISOString()}] Zoom meeting grid loaded\`);
-        } catch (waitError) {
-          console.log(\`[${new Date().toISOString()}] Timeout waiting for Zoom meeting grid to load: \${waitError.message}\`);
-        }
-
-        // Mark all bots as successful
-        botPair.forEach(bot => {
-          results.push({ 
-            success: true, 
-            botId: bot.id, 
-            browser: 'chromium',
-            keepOpenOnTimeout: true,
-            scheduledTermination: new Date(Date.now() + duration).toISOString()
+          console.log(\`[${new Date().toISOString()}] chromium attempting to join with \${botPair.length} bots in a single page\`);
+          
+          // Create usernames parameter by joining all bot names
+          const usernamesParam = botPair.map(bot => encodeURIComponent(bot.name)).join(',');
+          
+          // Add optimized query parameters when optimizedJoin is enabled
+          let url = \`\${origin}/meetings?usernames=\${usernamesParam}&meetingId=\${encodeURIComponent(meetingId)}&password=\${encodeURIComponent(password)}&signature=\${encodeURIComponent(signature)}\`;
+          
+          if (optimizedJoin) {
+            url += \`&optimized=true\`;
+            if (disableVideo) url += \`&noVideo=true\`;
+            if (disableAudio) url += \`&noAudio=true\`;
+            if (lowResolution) url += \`&lowRes=true\`;
+          }
+          
+          console.log(\`[${new Date().toISOString()}] Navigating to: \${url}\`);
+          
+          // Set shorter timeouts for navigation but handle gracefully
+          const navigationResponse = await page.goto(url, { 
+            waitUntil: 'domcontentloaded', // Use faster domcontentloaded instead of load
+            timeout: 30000 
+          }).catch(error => {
+            console.log(\`[${new Date().toISOString()}] Navigation initial timeout for multiple bots, continuing anyway: \${error.message}\`);
+            return null; // Return null but continue execution
           });
-        });
-        
-      } catch (error) {
-        console.log(\`[${new Date().toISOString()}] chromium bots encountered issue: \${error.message}\`);
-        
-        // Even on error, if keepOpenOnTimeout is true, mark as success and keep page open
-        if (keepOpenOnTimeout) {
+          
+          if (navigationResponse && navigationResponse.status() >= 400) {
+            console.warn(\`[${new Date().toISOString()}] Navigation returned error status \${navigationResponse.status()} for multiple bots, but continuing\`);
+          }
+
+          // Wait for the grid of iframes to load
+          try {
+            await page.waitForSelector('iframe', { timeout: selectorTimeout });
+            console.log(\`[${new Date().toISOString()}] Zoom meeting grid loaded\`);
+          } catch (waitError) {
+            console.log(\`[${new Date().toISOString()}] Timeout waiting for Zoom meeting grid to load: \${waitError.message}\`);
+          }
+
+          // Mark all bots as successful
           botPair.forEach(bot => {
             results.push({ 
               success: true, 
               botId: bot.id, 
               browser: 'chromium',
-              error: 'Tab kept open despite error: ' + error.message,
               keepOpenOnTimeout: true,
               scheduledTermination: new Date(Date.now() + duration).toISOString()
             });
           });
-          // Don't close the page
-        } else {
-          botPair.forEach(bot => {
+          
+        } catch (error) {
+          console.log(\`[${new Date().toISOString()}] chromium bots encountered issue: \${error.message}\`);
+          
+          // Even on error, if keepOpenOnTimeout is true, mark as success and keep page open
+          if (keepOpenOnTimeout) {
+            botPair.forEach(bot => {
+              results.push({ 
+                success: true, 
+                botId: bot.id, 
+                browser: 'chromium',
+                error: 'Tab kept open despite error: ' + error.message,
+                keepOpenOnTimeout: true,
+                scheduledTermination: new Date(Date.now() + duration).toISOString()
+              });
+            });
+            // Don't close the page
+          } else {
+            botPair.forEach(bot => {
+              results.push({ 
+                success: false, 
+                botId: bot.id, 
+                error: error.message, 
+                browser: 'chromium'
+              });
+            });
+            await page.close().catch(() => {}); // Ignore close errors
+          }
+        }
+      } else {
+        // Use separate pages for each bot when count is small (<=3)
+        console.log(\`[${new Date().toISOString()}] Using multi-page approach for \${botPair.length} bots\`);
+        
+        // Process bots in sequence to avoid overwhelming the browser
+        for (const bot of botPair) {
+          console.log(\`[${new Date().toISOString()}] Processing bot: \${bot.name}\`);
+          
+          try {
+            const page = await context.newPage();
+            pages.push(page);
+            
+            // Configure page for performance
+            await page.route('**/*.{png,jpg,jpeg,gif,webp,css,woff,woff2,svg,ico}', route => {
+              return route.abort();
+            });
+            
+            await page.route(/google-analytics|googletagmanager|analytics|facebook|twitter|hotjar/, route => {
+              return route.abort();
+            });
+            
+            // Set low-res viewport
+            const viewportWidth = lowResolution ? 640 : 1024;
+            const viewportHeight = lowResolution ? 480 : 720;
+            await page.setViewportSize({ width: viewportWidth, height: viewportHeight });
+            
+            // Add optimized query parameters
+            let url = \`\${origin}/meeting?username=\${encodeURIComponent(bot.name)}&meetingId=\${encodeURIComponent(meetingId)}&password=\${encodeURIComponent(password)}&signature=\${encodeURIComponent(signature)}\`;
+            
+            if (optimizedJoin) {
+              url += \`&optimized=true\`;
+              if (disableVideo) url += \`&noVideo=true\`;
+              if (disableAudio) url += \`&noAudio=true\`;
+              if (lowResolution) url += \`&lowRes=true\`;
+            }
+            
+            console.log(\`[${new Date().toISOString()}] Navigating to: \${url} for bot \${bot.name}\`);
+            
+            const navigationResponse = await page.goto(url, { 
+              waitUntil: 'domcontentloaded',
+              timeout: 30000 
+            }).catch(error => {
+              console.log(\`[${new Date().toISOString()}] Navigation timeout for bot \${bot.name}, continuing: \${error.message}\`);
+              return null;
+            });
+            
+            try {
+              await page.waitForSelector('iframe', { timeout: 30000 });
+              console.log(\`[${new Date().toISOString()}] Zoom meeting loaded for bot \${bot.name}\`);
+              
+              results.push({ 
+                success: true, 
+                botId: bot.id, 
+                browser: 'chromium',
+                keepOpenOnTimeout: true,
+                scheduledTermination: new Date(Date.now() + duration).toISOString()
+              });
+            } catch (waitError) {
+              console.log(\`[${new Date().toISOString()}] Timeout waiting for Zoom meeting for bot \${bot.name}: \${waitError.message}\`);
+              
+              // Mark as success anyway if we're keeping the page open
+              if (keepOpenOnTimeout) {
+                results.push({ 
+                  success: true, 
+                  botId: bot.id, 
+                  browser: 'chromium',
+                  error: 'Tab kept open despite selector timeout',
+                  keepOpenOnTimeout: true,
+                  scheduledTermination: new Date(Date.now() + duration).toISOString()
+                });
+              } else {
+                results.push({ 
+                  success: false, 
+                  botId: bot.id, 
+                  error: 'Selector timeout: ' + waitError.message, 
+                  browser: 'chromium'
+                });
+                await page.close().catch(() => {});
+              }
+            }
+            
+            // Small delay between bot page creations to prevent overwhelming the browser
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            
+          } catch (botError) {
+            console.error(\`[${new Date().toISOString()}] Error processing bot \${bot.name}: \${botError.message}\`);
             results.push({ 
               success: false, 
               botId: bot.id, 
-              error: error.message, 
+              error: 'Processing error: ' + botError.message, 
               browser: 'chromium'
             });
-          });
-          await page.close().catch(() => {}); // Ignore close errors
+          }
         }
       }
+
+      // Run garbage collection to free up memory
+      optimizeMemory();
 
       // Set up keep-alive for browser context to prevent it from being garbage collected
       if (keepOpenOnTimeout) {
@@ -258,6 +420,9 @@ export const workerScript = `
           // Report that browsers are still alive
           const remainingMinutes = ((Date.now() + duration) - Date.now()) / 60000;
           console.log(\`[${new Date().toISOString()}] chromium keeping browser alive for \${botPair.length} bots. Approximately \${remainingMinutes.toFixed(1)} minutes remaining\`);
+          
+          // Run periodic memory optimization
+          optimizeMemory();
         }, 60000); // Log every minute
         
         // Ensure interval doesn't keep Node.js process alive indefinitely
