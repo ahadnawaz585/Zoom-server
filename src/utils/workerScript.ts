@@ -153,36 +153,34 @@ export const workerScript = `
 
       const results = [];
       
-      // Create all pages in parallel
-      console.log(\`[${new Date().toISOString()}] Creating \${botPair.length} pages in parallel\`);
-      const pages = await Promise.all(botPair.map(() => context.newPage()));
+      // Instead of loading individual bot pages, create a single page with all bots
+      console.log(\`[${new Date().toISOString()}] Creating a single page for all bots\`);
+      const page = await context.newPage();
       
-      // Configure each page for performance
-      await Promise.all(pages.map(async (page) => {
-        // Disable unnecessary features
-        await page.route('**/*.{png,jpg,jpeg,gif,webp,css,woff,woff2,svg,ico}', route => {
-          return route.abort();
-        });
-        
-        // Block analytics, ads and other unnecessary requests
-        await page.route(/google-analytics|googletagmanager|analytics|facebook|twitter|hotjar/, route => {
-          return route.abort();
-        });
-        
-        // Set low-res viewport to reduce resource usage
-        const viewportWidth = lowResolution ? 640 : 800;
-        const viewportHeight = lowResolution ? 480 : 600;
-        await page.setViewportSize({ width: viewportWidth, height: viewportHeight });
-      }));
+      // Configure page for performance
+      // Disable unnecessary features
+      await page.route('**/*.{png,jpg,jpeg,gif,webp,css,woff,woff2,svg,ico}', route => {
+        return route.abort();
+      });
+      
+      // Block analytics, ads and other unnecessary requests
+      await page.route(/google-analytics|googletagmanager|analytics|facebook|twitter|hotjar/, route => {
+        return route.abort();
+      });
+      
+      // Set low-res viewport to reduce resource usage
+      const viewportWidth = lowResolution ? 1280 : 1600;
+      const viewportHeight = lowResolution ? 720 : 900;
+      await page.setViewportSize({ width: viewportWidth, height: viewportHeight });
 
-      // Process all bots in parallel for maximum efficiency
-      console.log(\`[${new Date().toISOString()}] Processing \${botPair.length} bots in parallel\`);
-      await Promise.all(botPair.map(async (bot, index) => {
-        const page = pages[index];
-        console.log(\`[${new Date().toISOString()}] chromium attempting to join with bot \${bot.name}\`);
+      try {
+        console.log(\`[${new Date().toISOString()}] chromium attempting to join with multiple bots\`);
+        
+        // Create usernames parameter by joining all bot names
+        const usernamesParam = botPair.map(bot => encodeURIComponent(bot.name)).join(',');
         
         // Add optimized query parameters when optimizedJoin is enabled
-        let url = \`\${origin}/meeting?username=\${encodeURIComponent(bot.name)}&meetingId=\${encodeURIComponent(meetingId)}&password=\${encodeURIComponent(password)}&signature=\${encodeURIComponent(signature)}\`;
+        let url = \`\${origin}/meetings?usernames=\${usernamesParam}&meetingId=\${encodeURIComponent(meetingId)}&password=\${encodeURIComponent(password)}&signature=\${encodeURIComponent(signature)}\`;
         
         if (optimizedJoin) {
           url += \`&optimized=true\`;
@@ -193,103 +191,29 @@ export const workerScript = `
         
         console.log(\`[${new Date().toISOString()}] Navigating to: \${url}\`);
         
+        // Set shorter timeouts for navigation but handle gracefully
+        const navigationResponse = await page.goto(url, { 
+          waitUntil: 'domcontentloaded', // Use faster domcontentloaded instead of load
+          timeout: 30000 
+        }).catch(error => {
+          console.log(\`[${new Date().toISOString()}] Navigation initial timeout for multiple bots, continuing anyway: \${error.message}\`);
+          return null; // Return null but continue execution
+        });
+        
+        if (navigationResponse && navigationResponse.status() >= 400) {
+          console.warn(\`[${new Date().toISOString()}] Navigation returned error status \${navigationResponse.status()} for multiple bots, but continuing\`);
+        }
+
+        // Wait for the grid of iframes to load
         try {
-          // Set shorter timeouts for navigation but handle gracefully
-          const navigationResponse = await page.goto(url, { 
-            waitUntil: 'domcontentloaded', // Use faster domcontentloaded instead of load
-            timeout: 30000 
-          }).catch(error => {
-            console.log(\`[${new Date().toISOString()}] Navigation initial timeout for \${bot.name}, continuing anyway: \${error.message}\`);
-            return null; // Return null but continue execution
-          });
-          
-          if (navigationResponse && navigationResponse.status() >= 400) {
-            console.warn(\`[${new Date().toISOString()}] Navigation returned error status \${navigationResponse.status()} for \${bot.name}, but continuing\`);
-          }
+          await page.waitForSelector('iframe', { timeout: selectorTimeout });
+          console.log(\`[${new Date().toISOString()}] Zoom meeting grid loaded\`);
+        } catch (waitError) {
+          console.log(\`[${new Date().toISOString()}] Timeout waiting for Zoom meeting grid to load: \${waitError.message}\`);
+        }
 
-          // Wait for Zoom meeting to load
-          try {
-            await page.waitForSelector('#meetingSDKElement[data-join-status="success"]', { timeout: selectorTimeout });
-            console.log(\`[${new Date().toISOString()}] Zoom meeting loaded for \${bot.name}\`);
-            
-            // Click the audio button to enable audio
-            await page.click('button[title="Audio"]');
-            console.log(\`[${new Date().toISOString()}] Audio button clicked for \${bot.name}\`);
-          } catch (waitError) {
-            console.log(\`[${new Date().toISOString()}] Timeout waiting for Zoom meeting to load for \${bot.name}: \${waitError.message}\`);
-          }
-
-          // Skip waiting for join indicator if requested
-          if (!skipJoinIndicator) {
-            try {
-              await Promise.race([
-                page.waitForSelector("#meeting-joined-indicator", { timeout: selectorTimeout }),
-                page.waitForSelector(".join-error", { timeout: selectorTimeout }).then(() => {
-                  throw new Error('Meeting join error detected');
-                })
-              ]);
-              console.log(\`[${new Date().toISOString()}] chromium bot \${bot.name} joined successfully\`);
-            } catch (waitError) {
-              console.log(\`[${new Date().toISOString()}] Indicator wait timeout for \${bot.name}: \${waitError.message}\`);
-            }
-          } else {
-            // Just wait a moment to let the page initialize
-            await page.waitForTimeout(2000);
-            console.log(\`[${new Date().toISOString()}] chromium bot \${bot.name} navigation complete - skipping join indicator check\`);
-          }
-          
-          // Run some basic interaction to ensure the meeting connection is established
-          try {
-            // Try to ensure audio/video permissions by clicking common UI elements
-            // These are optional and won't fail the process if they don't exist
-            const possibleJoinButtons = [
-              'button:has-text("Join")', 
-              'button:has-text("Join Audio")', 
-              'button:has-text("Join with Computer Audio")',
-              '[data-testid="join-btn"]'
-            ];
-            
-            // Try each selector, but don't worry if not found
-            for (const selector of possibleJoinButtons) {
-              await page.locator(selector).click().catch(() => {}); // Ignore errors
-              await page.waitForTimeout(500);
-            }
-            
-            // Handle optimized settings if needed
-            if (optimizedJoin) {
-              // Disable video if requested (look for common UI selectors)
-              if (disableVideo) {
-                const videoButtons = [
-                  'button[aria-label*="video"]',
-                  'button[title*="video"]',
-                  '[data-testid="video-btn"]'
-                ];
-                
-                for (const selector of videoButtons) {
-                  await page.locator(selector).click().catch(() => {}); // Ignore errors
-                  await page.waitForTimeout(500);
-                }
-              }
-              
-              // Disable audio if requested
-              if (disableAudio) {
-                const audioButtons = [
-                  'button[aria-label*="mute"]',
-                  'button[title*="mute"]',
-                  '[data-testid="audio-btn"]'
-                ];
-                
-                for (const selector of audioButtons) {
-                  await page.locator(selector).click().catch(() => {}); // Ignore errors
-                  await page.waitForTimeout(500);
-                }
-              }
-            }
-          } catch (interactionError) {
-            console.log(\`[${new Date().toISOString()}] Optional interaction error for \${bot.name}, continuing: \${interactionError.message}\`);
-          }
-          
-          // Always mark as success
+        // Mark all bots as successful
+        botPair.forEach(bot => {
           results.push({ 
             success: true, 
             botId: bot.id, 
@@ -297,13 +221,14 @@ export const workerScript = `
             keepOpenOnTimeout: true,
             scheduledTermination: new Date(Date.now() + duration).toISOString()
           });
-          
-          // Important: Don't close the page - leave it open
-        } catch (error) {
-          console.log(\`[${new Date().toISOString()}] chromium bot \${bot.name} encountered issue: \${error.message}\`);
-          
-          // Even on error, if keepOpenOnTimeout is true, mark as success and keep page open
-          if (keepOpenOnTimeout) {
+        });
+        
+      } catch (error) {
+        console.log(\`[${new Date().toISOString()}] chromium bots encountered issue: \${error.message}\`);
+        
+        // Even on error, if keepOpenOnTimeout is true, mark as success and keep page open
+        if (keepOpenOnTimeout) {
+          botPair.forEach(bot => {
             results.push({ 
               success: true, 
               botId: bot.id, 
@@ -312,25 +237,27 @@ export const workerScript = `
               keepOpenOnTimeout: true,
               scheduledTermination: new Date(Date.now() + duration).toISOString()
             });
-            // Don't close the page
-          } else {
+          });
+          // Don't close the page
+        } else {
+          botPair.forEach(bot => {
             results.push({ 
               success: false, 
               botId: bot.id, 
               error: error.message, 
               browser: 'chromium'
             });
-            await page.close().catch(() => {}); // Ignore close errors
-          }
+          });
+          await page.close().catch(() => {}); // Ignore close errors
         }
-      }));
+      }
 
       // Set up keep-alive for browser context to prevent it from being garbage collected
       if (keepOpenOnTimeout) {
         keepAliveInterval = setInterval(() => {
           // Report that browsers are still alive
           const remainingMinutes = ((Date.now() + duration) - Date.now()) / 60000;
-          console.log(\`[${new Date().toISOString()}] chromium keeping browsers alive for \${botPair.map(b => b.name).join(', ')}. Approximately \${remainingMinutes.toFixed(1)} minutes remaining\`);
+          console.log(\`[${new Date().toISOString()}] chromium keeping browser alive for \${botPair.length} bots. Approximately \${remainingMinutes.toFixed(1)} minutes remaining\`);
         }, 60000); // Log every minute
         
         // Ensure interval doesn't keep Node.js process alive indefinitely
@@ -338,7 +265,7 @@ export const workerScript = `
       }
 
       // Don't close the context or browser - leave everything open
-      console.log(\`[${new Date().toISOString()}] chromium keeping browser open for bots \${botPair.map(b => b.name).join(', ')} for \${duration/60000} minutes\`);
+      console.log(\`[${new Date().toISOString()}] chromium keeping browser open for \${botPair.length} bots for \${duration/60000} minutes\`);
       return results;
     } catch (error) {
       console.error(\`[${new Date().toISOString()}] chromium launch failed: \${error.message}\`);

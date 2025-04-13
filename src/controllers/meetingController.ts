@@ -12,6 +12,7 @@ interface ActiveWorkerInfo {
   terminationTimeout: NodeJS.Timeout;
   startTime: number;
   duration: number; // in minutes
+  botCount: number; // number of bots managed by this worker
 }
 
 // Global map to track all active workers across requests
@@ -21,8 +22,17 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
   console.log(`[${new Date().toISOString()}] Received join meeting request`);
   const body = req.body as JoinRequest;
   let { bots, meetingId, password, botCount = 0, duration = 60 } = body;
-  const maxParallel = 50; // Increased from 10 to 50 for higher parallelism
-  console.log("Request received:", meetingId, password, botCount, duration);
+  
+  // Configuration options with sensible defaults
+  const config = {
+    maxBotsPerWorker: parseInt(process.env.MAX_BOTS_PER_WORKER || '6'), // Configurable batch size
+    maxConcurrentWorkers: parseInt(process.env.MAX_CONCURRENT_WORKERS || '50'),
+    minBotsPerWorker: parseInt(process.env.MIN_BOTS_PER_WORKER || '1'), // For smaller batches
+    workerTimeout: parseInt(process.env.WORKER_TIMEOUT || '60000'), // 1 minute timeout for worker to report back
+    gracePeriod: parseInt(process.env.GRACE_PERIOD || '5000'), // 5 seconds for cleanup
+  };
+  
+  console.log(`[${new Date().toISOString()}] Request received: meetingId=${meetingId}, botCount=${botCount}, duration=${duration}`);
 
   if (!meetingId || !password) {
     console.error(`[${new Date().toISOString()}] Missing required fields`);
@@ -35,8 +45,13 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
   console.log(`[${new Date().toISOString()}] Using duration: ${duration} minutes`);
 
   bots = bots || [];
-  console.log(`[${new Date().toISOString()}] Initial bot count: ${bots.length}, requested botCount: ${botCount}`);
-  if (botCount > 0) bots = [...bots, ...generateBots(botCount, bots)];
+  console.log(`[${new Date().toISOString()}] Initial bot count: ${bots.length}, requested additional botCount: ${botCount}`);
+  
+  // Generate additional bots if needed
+  if (botCount > 0) {
+    bots = [...bots, ...generateBots(botCount, bots)];
+  }
+  
   if (bots.length === 0) {
     console.error(`[${new Date().toISOString()}] No bots provided`);
     res.status(400).json({ error: "No bots provided" });
@@ -48,59 +63,63 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
   const signature = await generateSignature(meetingId, 0, duration);
 
   // Use only Chromium for faster performance
-  const browserTypes: ('chromium')[] = ['chromium'];
+  const browserType = 'chromium';
   
-  // Ensure even distribution of bots
-  const totalBots = bots.length;
+  // Shuffle bots for random distribution
   const shuffledBots = [...bots].sort(() => Math.random() - 0.5);
   
-  // Initialize bot distribution structure
-  const botBatchesByBrowser: { [key: string]: Bot[][] } = { 
-    chromium: []
-  };
+  // Calculate optimal batch size based on total bots
+  const totalBots = shuffledBots.length;
+  const cpuCount = cpus().length;
   
-  // Group bots into batches of 4 instead of pairs
-  for (const browser of browserTypes) {
-    // Group bots into larger batches (groups of 4)
-    for (let j = 0; j < shuffledBots.length; j += 4) {
-      const batch = shuffledBots.slice(j, Math.min(j + 4, shuffledBots.length));
-      botBatchesByBrowser[browser].push(batch);
-    }
+  // Adaptive batch sizing algorithm:
+  // - For smaller sets (< 4 bots), just use one bot per worker
+  // - For medium sets (4-20 bots), use 2-4 bots per worker
+  // - For larger sets (>20 bots), aim for maxBotsPerWorker (6 by default)
+  let optimalBotsPerWorker = config.maxBotsPerWorker;
+  
+  if (totalBots < 4) {
+    optimalBotsPerWorker = config.minBotsPerWorker; // Use 1 bot per worker for very small groups
+  } else if (totalBots <= 20) {
+    // For medium groups, find a divisor that makes sense
+    optimalBotsPerWorker = Math.min(4, Math.ceil(totalBots / Math.ceil(totalBots / 4)));
   }
-
-  // Create tasks from the distributed bots
-  const tasks: Task[] = [];
-  for (const browser of browserTypes) {
-    botBatchesByBrowser[browser].forEach(botBatch => {
-      tasks.push({
-        botPair: botBatch, // Now contains up to 4 bots
-        meetingId,
-        password,
-        origin,
-        signature,
-        browserType: browser,
-        keepOpenOnTimeout: true,
-        skipJoinIndicator: true,
-        selectorTimeout: 86400000,
-        // Add new options for faster joining
-        optimizedJoin: true, // Flag for worker script to use optimized settings
-        disableVideo: true,  // Flag to disable video
-        disableAudio: true,  // Flag to disable audio
-        lowResolution: true, // Flag to use low resolution
-        duration: duration * 60 * 1000, // Convert minutes to milliseconds for worker
-      });
-    });
+  
+  // Create batches based on calculated optimal size
+  const botBatches: Bot[][] = [];
+  for (let i = 0; i < shuffledBots.length; i += optimalBotsPerWorker) {
+    const batch = shuffledBots.slice(i, Math.min(i + optimalBotsPerWorker, shuffledBots.length));
+    botBatches.push(batch);
   }
+  
+  // Create tasks from the batches
+  const tasks: Task[] = botBatches.map(batch => ({
+    botPair: batch, // Now contains optimal number of bots
+    meetingId,
+    password,
+    origin,
+    signature,
+    browserType,
+    keepOpenOnTimeout: true,
+    skipJoinIndicator: true,
+    selectorTimeout: 86400000,
+    // Add new options for faster joining
+    optimizedJoin: true, // Flag for worker script to use optimized settings
+    disableVideo: true,  // Flag to disable video
+    disableAudio: true,  // Flag to disable audio
+    lowResolution: true, // Flag to use low resolution
+    duration: duration * 60 * 1000, // Convert minutes to milliseconds for worker
+  }));
 
   // Log bot distribution
-  const chromiumBots = botBatchesByBrowser.chromium.flat().length;
-  console.log(`[${new Date().toISOString()}] Created ${tasks.length} bot batches: ` +
-    `Chromium: ${botBatchesByBrowser.chromium.length} (${chromiumBots} bots)`);
-  console.log(`[${new Date().toISOString()}] Total bots distributed: ${chromiumBots} out of ${totalBots}`);
+  console.log(`[${new Date().toISOString()}] Created ${tasks.length} bot batches with ${optimalBotsPerWorker} bots per batch (optimal)`);
+  console.log(`[${new Date().toISOString()}] Total bots: ${totalBots}, Batches: ${botBatches.length}`);
 
   // Calculate optimal number of concurrent workers
-  const cpuCount = cpus().length;
-  const MAX_CONCURRENT_WORKERS = maxParallel || Math.max(cpuCount * 2, tasks.length);
+  const MAX_CONCURRENT_WORKERS = Math.min(
+    config.maxConcurrentWorkers, 
+    Math.max(cpuCount * 2, tasks.length)
+  );
   
   console.log(`[${new Date().toISOString()}] Starting execution with maximum parallelism: ${MAX_CONCURRENT_WORKERS} concurrent workers`);
 
@@ -138,10 +157,10 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
   const activeWorkers = new Map<string, Worker>();
 
   // Function to schedule worker termination after duration
-  const scheduleWorkerTermination = (taskId: string, worker: Worker, durationMinutes: number): NodeJS.Timeout => {
+  const scheduleWorkerTermination = (taskId: string, worker: Worker, durationMinutes: number, botCount: number): NodeJS.Timeout => {
     const durationMs = durationMinutes * 60 * 1000;
     
-    console.log(`[${new Date().toISOString()}] Scheduling termination for task ${taskId} after ${durationMinutes} minutes`);
+    console.log(`[${new Date().toISOString()}] Scheduling termination for task ${taskId} with ${botCount} bots after ${durationMinutes} minutes`);
     
     return setTimeout(() => {
       try {
@@ -158,7 +177,7 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
             activeWorkers.delete(taskId);
             globalActiveWorkers.delete(taskId);
           }
-        }, 5000); // 5 second grace period for cleanup
+        }, config.gracePeriod);
       } catch (error) {
         console.error(`[${new Date().toISOString()}] Error terminating worker for task ${taskId}: ${error}`);
       }
@@ -171,7 +190,7 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
     // Wait for a permit before starting the task
     await semaphore.acquire();
     
-    console.log(`[${new Date().toISOString()}] Starting task ${taskId} with ${task.browserType} (active workers: ${activeWorkers.size})`);
+    console.log(`[${new Date().toISOString()}] Starting task ${taskId} with ${task.browserType} for ${task.botPair.length} bots (active workers: ${activeWorkers.size})`);
     
     return new Promise<WorkerResult[]>((resolve) => {
       const worker = new Worker(workerScript, { 
@@ -183,24 +202,25 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
             highPriority: true,
           }
         },
-        // Reduced resource limits for faster startup and more concurrent workers
+        // Dynamic resource limits based on batch size
         resourceLimits: {
-          maxOldGenerationSizeMb: 200,
-          maxYoungGenerationSizeMb: 100,
+          maxOldGenerationSizeMb: 150 + (task.botPair.length * 25), // Scale with bot count
+          maxYoungGenerationSizeMb: 75 + (task.botPair.length * 10),
         }
       });
 
       activeWorkers.set(taskId, worker);
       
       // Schedule termination after duration minutes
-      const terminationTimeout = scheduleWorkerTermination(taskId, worker, duration);
+      const terminationTimeout = scheduleWorkerTermination(taskId, worker, duration, task.botPair.length);
       
       // Store in global map with termination info
       globalActiveWorkers.set(taskId, {
         worker,
         terminationTimeout,
         startTime: Date.now(),
-        duration
+        duration,
+        botCount: task.botPair.length
       });
       
       console.log(`[${new Date().toISOString()}] Active workers: ${activeWorkers.size}, will terminate in ${duration} minutes`);
@@ -210,7 +230,7 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
         clearTimeout(timeoutId);
         
         // Don't remove from global active workers map yet - we'll let the duration timer handle that
-        console.log(`[${new Date().toISOString()}] Worker completed initial join for ${task.browserType} bots ${task.botPair.map(b => b.name).join(', ')}`);
+        console.log(`[${new Date().toISOString()}] Worker completed initial join for ${task.botPair.length} ${task.browserType} bots`);
         console.log(`[${new Date().toISOString()}] Bots will remain in meeting for ${duration} minutes`);
         
         const processedResults = result.map(r => {
@@ -238,7 +258,7 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
           globalActiveWorkers.delete(taskId);
         }
         
-        console.error(`[${new Date().toISOString()}] Worker error for ${task.browserType} bots ${task.botPair.map(b => b.name).join(', ')}: ${error.stack}`);
+        console.error(`[${new Date().toISOString()}] Worker error for ${task.botPair.length} ${task.browserType} bots: ${error.stack}`);
         semaphore.release();
         resolve(task.botPair.map(bot => ({
           success: false,
@@ -260,7 +280,7 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
             globalActiveWorkers.delete(taskId);
           }
           
-          console.error(`[${new Date().toISOString()}] Worker exited with code ${code} for ${task.browserType} bots ${task.botPair.map(b => b.name).join(', ')}`);
+          console.error(`[${new Date().toISOString()}] Worker exited with code ${code} for ${task.botPair.length} ${task.browserType} bots`);
           semaphore.release();
           resolve(task.botPair.map(bot => ({
             success: false,
@@ -273,7 +293,7 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
 
       // Shorter timeout for faster error handling
       timeoutId = setTimeout(() => {
-        console.log(`[${new Date().toISOString()}] Worker main process timeout for ${task.browserType} bots ${task.botPair.map(b => b.name).join(', ')} - keeping active for ${duration} minutes`);
+        console.log(`[${new Date().toISOString()}] Worker main process timeout for ${task.botPair.length} ${task.browserType} bots - keeping active for ${duration} minutes`);
         semaphore.release();
         resolve(task.botPair.map(bot => ({
           success: true,
@@ -283,7 +303,7 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
           keepOpenOnTimeout: true,
           scheduledTermination: new Date(Date.now() + duration * 60 * 1000).toISOString()
         })));
-      }, 60000); // Reduced from 600000 (10 min) to 60000 (1 min)
+      }, config.workerTimeout);
     });
   };
 
@@ -328,6 +348,11 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
       tabsWillCloseAt: new Date(Date.now() + duration * 60 * 1000).toISOString(),
       durationMinutes: duration,
       failures,
+      workerStats: {
+        totalWorkers: tasks.length,
+        botsPerWorker: optimalBotsPerWorker,
+        batchDistribution: tasks.map(t => t.botPair.length).join(',')
+      },
       browserStats: {
         chromium: {
           total: results.filter(r => r.browser === 'chromium').length,
@@ -367,6 +392,7 @@ export const getActiveWorkers = (req: Request, res: Response): void => {
     
     return {
       taskId,
+      botCount: info.botCount,
       startTime: new Date(info.startTime).toISOString(),
       duration: info.duration,
       elapsedMinutes: parseFloat(elapsedMinutes.toFixed(2)),
@@ -375,8 +401,12 @@ export const getActiveWorkers = (req: Request, res: Response): void => {
     };
   });
   
+  // Calculate total bots in active sessions
+  const totalActiveBots = activeWorkerData.reduce((sum, worker) => sum + worker.botCount, 0);
+  
   res.status(200).json({
     activeWorkers: activeWorkerData.length,
+    totalActiveBots,
     workers: activeWorkerData
   });
 };
@@ -384,10 +414,11 @@ export const getActiveWorkers = (req: Request, res: Response): void => {
 // Add an endpoint to manually terminate all workers
 export const terminateAllWorkers = (req: Request, res: Response): void => {
   const count = globalActiveWorkers.size;
+  const totalBots = Array.from(globalActiveWorkers.values()).reduce((sum, info) => sum + info.botCount, 0);
   
   globalActiveWorkers.forEach((info, taskId) => {
     try {
-      console.log(`[${new Date().toISOString()}] Manually terminating worker for task ${taskId}`);
+      console.log(`[${new Date().toISOString()}] Manually terminating worker for task ${taskId} with ${info.botCount} bots`);
       clearTimeout(info.terminationTimeout);
       info.worker.postMessage({ type: 'TERMINATE' });
       
@@ -405,7 +436,7 @@ export const terminateAllWorkers = (req: Request, res: Response): void => {
   
   res.status(200).json({
     success: true,
-    message: `Initiated termination of ${count} worker(s)`,
+    message: `Initiated termination of ${count} worker(s) controlling ${totalBots} bots`,
     terminatedAt: new Date().toISOString()
   });
 };
