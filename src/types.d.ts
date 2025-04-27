@@ -40,3 +40,36 @@ export interface WorkerResult {
   keepOpenOnTimeout?:any;
   browser: 'chromium' | 'firefox' | 'webkit';
 }
+
+
+export interface TabInfo {
+  id: string;
+  url: string;
+  title?: string;
+  openedAt: Date;
+  isActive: boolean;
+}
+
+export interface BrowserDetails {
+  browserId: string;
+  launchTime: Date;
+  isOpen: boolean;
+  tabCount: number;
+  tabs: TabInfo[];
+}
+
+export interface SystemMetrics {
+  totalWorkers: number;
+  totalActiveBots: number;
+  lastChecked: number;
+  memoryUsage: number;
+  cpuLoad: number;
+}
+
+export interface ActiveWorkerInfo {
+  worker: Worker;
+  terminationTimeout: NodeJS.Timeout;
+  startTime: number;
+  duration: number; // in minutes
+  botCount: number;
+}
