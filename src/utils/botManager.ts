@@ -17,7 +17,7 @@ export class BotManager {
     signature: string
   ): Promise<{ tabId: string; botIds: string[] }[]> {
     const results: { tabId: string; botIds: string[] }[] = [];
-    const maxBotsPerTab = 3; // Use single page for up to 3 bots to save resources
+    const maxBotsPerTab = 10; // Use single page for up to 3 bots to save resources
 
     for (let i = 0; i < bots.length; i += maxBotsPerTab) {
       const batch = bots.slice(i, i + maxBotsPerTab);
