@@ -18,7 +18,7 @@ interface BrowserDetails {
   tabs: TabInfo[];
 }
 
-class BrowserManager {
+export default class BrowserManager {
   private browser: Browser | null = null;
   private context: BrowserContext | null = null;
   private pages: Map<string, Page> = new Map();
@@ -36,8 +36,10 @@ class BrowserManager {
   }
 
   async launchBrowser(resourceLimits: { maxMemoryMB: number } = { maxMemoryMB: 512 }): Promise<void> {
-    if (this.browser) {
-      throw new Error('Browser already running');
+    // Reuse existing browser if already initialized
+    if (this.browser && this.context && this.details.isOpen) {
+      console.log(`[${new Date().toISOString()}] Reusing existing browser instance (ID: ${this.details.browserId})`);
+      return;
     }
 
     const launchOptions: any = {
@@ -82,6 +84,8 @@ class BrowserManager {
     this.browser = await chromium.launch(launchOptions);
     this.context = await this.browser.newContext();
     this.details.isOpen = true;
+    this.details.launchTime = new Date();
+    this.details.browserId = uuidv4();
     await this.saveDetails();
   }
 
@@ -109,6 +113,43 @@ class BrowserManager {
     this.details.tabCount = this.pages.size;
     
     await this.saveDetails();
+    return tabId;
+  }
+
+  async openTabForDuration(url: string, durationMs: number): Promise<string> {
+    if (!this.browser || !this.context) {
+      throw new Error('Browser not initialized');
+    }
+
+    const page = await this.context.newPage();
+    const tabId = uuidv4();
+
+    await page.goto(url, { waitUntil: 'domcontentloaded' });
+    const title = await page.title();
+
+    const tabInfo: TabInfo = {
+      id: tabId,
+      url,
+      title,
+      openedAt: new Date(),
+      isActive: true
+    };
+
+    this.pages.set(tabId, page);
+    this.details.tabs.push(tabInfo);
+    this.details.tabCount = this.pages.size;
+
+    await this.saveDetails();
+
+    // Schedule tab closure after specified duration
+    setTimeout(async () => {
+      try {
+        await this.closeTab(tabId);
+      } catch (error) {
+        console.error(`[${new Date().toISOString()}] Failed to auto-close tab ${tabId}:`, error);
+      }
+    }, durationMs);
+
     return tabId;
   }
 
@@ -231,44 +272,4 @@ class BrowserManager {
     }
     await page.setViewportSize({ width, height });
   }
-
-  // Add this method inside the BrowserManager class
-async openTabForDuration(url: string, durationMs: number): Promise<string> {
-  if (!this.browser || !this.context) {
-    throw new Error('Browser not initialized');
-  }
-
-  const page = await this.context.newPage();
-  const tabId = uuidv4();
-
-  await page.goto(url, { waitUntil: 'domcontentloaded' });
-  const title = await page.title();
-
-  const tabInfo: TabInfo = {
-    id: tabId,
-    url,
-    title,
-    openedAt: new Date(),
-    isActive: true
-  };
-
-  this.pages.set(tabId, page);
-  this.details.tabs.push(tabInfo);
-  this.details.tabCount = this.pages.size;
-
-  await this.saveDetails();
-
-  // Schedule tab closure after specified duration
-  setTimeout(async () => {
-    try {
-      await this.closeTab(tabId);
-    } catch (error) {
-      console.error(`Failed to auto-close tab ${tabId}:`, error);
-    }
-  }, durationMs);
-
-  return tabId;
 }
-}
-
-export default BrowserManager;
