@@ -58,6 +58,7 @@ export default class BrowserManager {
         '--disable-translate',
         '--hide-scrollbars',
         '--metrics-recording-only',
+        '--mute-audio', // Remove if audio output is needed
         '--no-default-browser-check',
         '--disable-hang-monitor',
         '--disable-prompt-on-repost',
