@@ -36,7 +36,6 @@ export default class BrowserManager {
   }
 
   async launchBrowser(resourceLimits: { maxMemoryMB: number } = { maxMemoryMB: 512 }): Promise<void> {
-    // Reuse existing browser if already initialized
     if (this.browser && this.context && this.details.isOpen) {
       console.log(`[${new Date().toISOString()}] Reusing existing browser instance (ID: ${this.details.browserId})`);
       return;
@@ -59,7 +58,7 @@ export default class BrowserManager {
         '--disable-translate',
         '--hide-scrollbars',
         '--metrics-recording-only',
-        '--mute-audio',
+        '--mute-audio', // Remove if audio output is needed
         '--no-default-browser-check',
         '--disable-hang-monitor',
         '--disable-prompt-on-repost',
@@ -71,10 +70,6 @@ export default class BrowserManager {
         '--force-color-profile=srgb',
         '--disable-backgrounding-occluded-windows',
         '--disable-background-timer-throttling',
-        '--use-fake-device-for-media-stream',
-        '--use-fake-ui-for-media-stream',
-        '--disable-webrtc-hw-encoding',
-        '--disable-webrtc-hw-decoding',
         '--force-device-scale-factor=0.5',
         `--js-flags=--max-old-space-size=${resourceLimits.maxMemoryMB}`,
         '--memory-pressure-off'
@@ -96,7 +91,10 @@ export default class BrowserManager {
 
     const page = await this.context.newPage();
     const tabId = uuidv4();
-    
+
+    // Grant microphone permissions for voice input
+    await this.context.grantPermissions(['microphone'], { origin: url });
+
     await page.goto(url, { waitUntil: 'domcontentloaded' });
     const title = await page.title();
 
@@ -111,7 +109,7 @@ export default class BrowserManager {
     this.pages.set(tabId, page);
     this.details.tabs.push(tabInfo);
     this.details.tabCount = this.pages.size;
-    
+
     await this.saveDetails();
     return tabId;
   }
@@ -124,6 +122,9 @@ export default class BrowserManager {
     const page = await this.context.newPage();
     const tabId = uuidv4();
 
+    // Grant microphone permissions for voice input
+    await this.context.grantPermissions(['microphone'], { origin: url });
+
     await page.goto(url, { waitUntil: 'domcontentloaded' });
     const title = await page.title();
 
@@ -141,7 +142,6 @@ export default class BrowserManager {
 
     await this.saveDetails();
 
-    // Schedule tab closure after specified duration
     setTimeout(async () => {
       try {
         await this.closeTab(tabId);
@@ -163,7 +163,7 @@ export default class BrowserManager {
     this.pages.delete(tabId);
     this.details.tabs = this.details.tabs.filter(tab => tab.id !== tabId);
     this.details.tabCount = this.pages.size;
-    
+
     await this.saveDetails();
   }
 
@@ -177,14 +177,14 @@ export default class BrowserManager {
     }
     await this.context?.close();
     await this.browser.close();
-    
+
     this.browser = null;
     this.context = null;
     this.pages.clear();
     this.details.isOpen = false;
     this.details.tabCount = 0;
     this.details.tabs = [];
-    
+
     await this.saveDetails();
   }
 
@@ -206,7 +206,7 @@ export default class BrowserManager {
       ...tab,
       isActive: tab.id === tabId
     }));
-    
+
     await page.bringToFront();
     await this.saveDetails();
   }
@@ -231,7 +231,7 @@ export default class BrowserManager {
 
     await page.goto(url, { waitUntil: 'domcontentloaded' });
     const title = await page.title();
-    
+
     const tabIndex = this.details.tabs.findIndex(tab => tab.id === tabId);
     if (tabIndex !== -1) {
       this.details.tabs[tabIndex] = {
@@ -240,7 +240,7 @@ export default class BrowserManager {
         title
       };
     }
-    
+
     await this.saveDetails();
   }
 
