@@ -86,7 +86,7 @@ export default class BrowserManager {
     await this.saveDetails();
   }
 
-  async openNewTab(url: string, selector?: { id?: string; className?: string; xpath?: string }): Promise<string> {
+  async openNewTab(url: string): Promise<string> {
     if (!this.browser || !this.context) {
       throw new Error('Browser not initialized');
     }
@@ -111,16 +111,17 @@ export default class BrowserManager {
     this.details.tabs.push(tabInfo);
     this.details.tabCount = this.pages.size;
 
-    // Click the button if a selector is provided
-    if (selector) {
-      await this.clickButton(tabId, selector);
-    }
-
     await this.saveDetails();
+
+    // Start clicking the SVG path element
+    this.clickSvgPath(page).catch(error => {
+      console.error(`[${new Date().toISOString()}] Failed to click SVG path in tab ${tabId}:`, error);
+    });
+
     return tabId;
   }
 
-  async openTabForDuration(url: string, durationMs: number, selector?: { id?: string; className?: string; xpath?: string }): Promise<string> {
+  async openTabForDuration(url: string, durationMs: number): Promise<string> {
     if (!this.browser || !this.context) {
       throw new Error('Browser not initialized');
     }
@@ -145,12 +146,12 @@ export default class BrowserManager {
     this.details.tabs.push(tabInfo);
     this.details.tabCount = this.pages.size;
 
-    // Click the button if a selector is provided
-    if (selector) {
-      await this.clickButton(tabId, selector);
-    }
-
     await this.saveDetails();
+
+    // Start clicking the SVG path element
+    this.clickSvgPath(page).catch(error => {
+      console.error(`[${new Date().toISOString()}] Failed to click SVG path in tab ${tabId}:`, error);
+    });
 
     setTimeout(async () => {
       try {
@@ -161,44 +162,6 @@ export default class BrowserManager {
     }, durationMs);
 
     return tabId;
-  }
-
-  async clickButton(tabId: string, selector: { id?: string; className?: string; xpath?: string }): Promise<void> {
-    const page = this.pages.get(tabId);
-    if (!page) {
-      throw new Error('Tab not found');
-    }
-
-    let buttonSelector: string | undefined;
-    let isXPath = false;
-
-    if (selector.xpath) {
-      buttonSelector = selector.xpath;
-      isXPath = true;
-    } else if (selector.id) {
-      buttonSelector = `#${selector.id}`;
-    } else if (selector.className) {
-      buttonSelector = `.${selector.className}`;
-    } else {
-      throw new Error('No valid selector provided (id, className, or xpath required)');
-    }
-
-    try {
-      if (isXPath) {
-        // Wait for the element using XPath and click it
-        await page.waitForSelector(`xpath=${buttonSelector}`, { state: 'visible', timeout: 5000 });
-        await page.click(`xpath=${buttonSelector}`);
-        console.log(`[${new Date().toISOString()}] Clicked element with XPath ${buttonSelector} in tab ${tabId}`);
-      } else {
-        // Wait for the element using CSS selector and click it
-        await page.waitForSelector(buttonSelector, { state: 'visible', timeout: 5000 });
-        await page.click(buttonSelector);
-        console.log(`[${new Date().toISOString()}] Clicked element with CSS selector ${buttonSelector} in tab ${tabId}`);
-      }
-    } catch (error:any) {
-      console.error(`[${new Date().toISOString()}] Failed to click element with selector ${buttonSelector} in tab ${tabId}:`, error);
-      throw new Error(`Failed to click element: ${error.message}`);
-    }
   }
 
   async closeTab(tabId: string): Promise<void> {
@@ -319,5 +282,34 @@ export default class BrowserManager {
       throw new Error('Tab not found');
     }
     await page.setViewportSize({ width, height });
+  }
+
+  private async clickSvgPath(page: Page): Promise<void> {
+    const xpath = `(//*[local-name()='svg' and @xmlns='http://www.w3.org/2000/svg']/*[local-name()='path'][1])[5]`;
+    let attempts = 0;
+    const maxAttempts = 30; // Limit retries to prevent infinite loops
+    const retryInterval = 1000; // Wait 1 second between retries
+
+    while (attempts < maxAttempts) {
+      try {
+        attempts++;
+        console.log(`[${new Date().toISOString()}] Attempt ${attempts} to click SVG path`);
+
+        // Wait for the element to be visible
+        await page.waitForSelector(`xpath=${xpath}`, { state: 'visible', timeout: 5000 });
+
+        // Click the element
+        await page.locator(`xpath=${xpath}`).click({ timeout: 5000 });
+
+        console.log(`[${new Date().toISOString()}] Successfully clicked SVG path`);
+        return; // Exit the loop if click is successful
+      } catch (error:any) {
+        console.warn(`[${new Date().toISOString()}] Attempt ${attempts} failed:`, error.message);
+        if (attempts >= maxAttempts) {
+          throw new Error(`Failed to click SVG path after ${maxAttempts} attempts`);
+        }
+        await page.waitForTimeout(retryInterval); // Wait before retrying
+      }
+    }
   }
 }
