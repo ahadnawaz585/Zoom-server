@@ -54,6 +54,8 @@ export default class BrowserManager {
         '--disable-extensions',
         '--disable-background-networking',
         '--disable-default-apps',
+        '--use-fake-device-for-media-stream',
+        '--use-fake-ui-for-media-stream',
         '--disable-sync',
         '--disable-translate',
         '--hide-scrollbars',
