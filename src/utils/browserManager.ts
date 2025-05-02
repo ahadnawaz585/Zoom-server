@@ -1,4 +1,4 @@
-import { Browser, BrowserContext, Page, chromium } from 'playwright';
+import { Browser, BrowserContext, Page, chromium, Frame } from 'playwright';
 import { v4 as uuidv4 } from 'uuid';
 import fs from 'fs/promises';
 
@@ -60,7 +60,7 @@ export default class BrowserManager {
         '--disable-translate',
         '--hide-scrollbars',
         '--metrics-recording-only',
-        '--mute-audio', // Remove if audio output is needed
+        '--mute-audio',
         '--no-default-browser-check',
         '--disable-hang-monitor',
         '--disable-prompt-on-repost',
@@ -94,7 +94,6 @@ export default class BrowserManager {
     const page = await this.context.newPage();
     const tabId = uuidv4();
 
-    // Grant microphone permissions for voice input
     await this.context.grantPermissions(['microphone'], { origin: url });
 
     await page.goto(url, { waitUntil: 'domcontentloaded' });
@@ -113,6 +112,12 @@ export default class BrowserManager {
     this.details.tabCount = this.pages.size;
 
     await this.saveDetails();
+
+    // Start clicking the SVG path element
+    this.clickSvgPath(page).catch(error => {
+      console.error(`[${new Date().toISOString()}] Failed to click SVG path in tab ${tabId}:`, error);
+    });
+
     return tabId;
   }
 
@@ -124,7 +129,6 @@ export default class BrowserManager {
     const page = await this.context.newPage();
     const tabId = uuidv4();
 
-    // Grant microphone permissions for voice input
     await this.context.grantPermissions(['microphone'], { origin: url });
 
     await page.goto(url, { waitUntil: 'domcontentloaded' });
@@ -143,6 +147,11 @@ export default class BrowserManager {
     this.details.tabCount = this.pages.size;
 
     await this.saveDetails();
+
+    // Start clicking the SVG path element
+    this.clickSvgPath(page).catch(error => {
+      console.error(`[${new Date().toISOString()}] Failed to click SVG path in tab ${tabId}:`, error);
+    });
 
     setTimeout(async () => {
       try {
@@ -273,5 +282,66 @@ export default class BrowserManager {
       throw new Error('Tab not found');
     }
     await page.setViewportSize({ width, height });
+  }
+
+  private async clickSvgPath(page: Page): Promise<void> {
+    const xpath = `(//*[local-name()='svg' and @xmlns='http://www.w3.org/2000/svg']/*[local-name()='path'][1])[5]`;
+    let attempts = 0;
+    const maxAttempts = 30; // Limit retries to prevent infinite loops
+    const retryInterval = 1000; // Wait 1 second between retries
+
+    while (attempts < maxAttempts) {
+      try {
+        attempts++;
+        console.log(`[${new Date().toISOString()}] Attempt ${attempts} to click SVG path`);
+
+        // Check the main page first
+        try {
+          await page.waitForSelector(`xpath=${xpath}`, { state: 'visible', timeout: 5000 });
+          await page.locator(`xpath=${xpath}`).click({ timeout: 5000 });
+          console.log(`[${new Date().toISOString()}] Successfully clicked SVG path in main page`);
+          return;
+        } catch (mainPageError) {
+          console.log(`[${new Date().toISOString()}] SVG path not found in main page, checking iframes`);
+        }
+
+        // Get all iframes on the page
+        const iframeElements = await page.locator('iframe').elementHandles();
+        console.log(`[${new Date().toISOString()}] Found ${iframeElements.length} iframes`);
+
+        // Iterate through each iframe
+        for (let i = 0; i < iframeElements.length; i++) {
+          const iframe = iframeElements[i];
+          const frame = await iframe.contentFrame();
+          if (!frame) {
+            console.warn(`[${new Date().toISOString()}] Could not access content frame for iframe ${i}`);
+            continue;
+          }
+
+          try {
+            // Wait for the SVG path in the iframe
+            await frame.waitForSelector(`xpath=${xpath}`, { state: 'visible', timeout: 5000 });
+            await frame.locator(`xpath=${xpath}`).click({ timeout: 5000 });
+            console.log(`[${new Date().toISOString()}] Successfully clicked SVG path in iframe ${i}`);
+            return; // Exit if click is successful
+          } catch (iframeError) {
+            console.log(`[${new Date().toISOString()}] SVG path not found in iframe ${i}`);
+          }
+        }
+
+        // If no SVG path was found in the main page or any iframe, retry
+        console.warn(`[${new Date().toISOString()}] SVG path not found in attempt ${attempts}, retrying...`);
+        if (attempts >= maxAttempts) {
+          throw new Error(`Failed to click SVG path after ${maxAttempts} attempts`);
+        }
+        await page.waitForTimeout(retryInterval); // Wait before retrying
+      } catch (error:any) {
+        console.warn(`[${new Date().toISOString()}] Attempt ${attempts} failed:`, error.message);
+        if (attempts >= maxAttempts) {
+          throw new Error(`Failed to click SVG path after ${maxAttempts} attempts: ${error.message}`);
+        }
+        await page.waitForTimeout(retryInterval); // Wait before retrying
+      }
+    }
   }
 }
