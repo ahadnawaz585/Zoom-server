@@ -1,4 +1,4 @@
-import { Browser, BrowserContext, Page, chromium } from 'playwright';
+import { Browser, BrowserContext, Page, chromium, Frame } from 'playwright';
 import { v4 as uuidv4 } from 'uuid';
 import fs from 'fs/promises';
 
@@ -295,18 +295,50 @@ export default class BrowserManager {
         attempts++;
         console.log(`[${new Date().toISOString()}] Attempt ${attempts} to click SVG path`);
 
-        // Wait for the element to be visible
-        await page.waitForSelector(`xpath=${xpath}`, { state: 'visible', timeout: 5000 });
+        // Check the main page first
+        try {
+          await page.waitForSelector(`xpath=${xpath}`, { state: 'visible', timeout: 5000 });
+          await page.locator(`xpath=${xpath}`).click({ timeout: 5000 });
+          console.log(`[${new Date().toISOString()}] Successfully clicked SVG path in main page`);
+          return;
+        } catch (mainPageError) {
+          console.log(`[${new Date().toISOString()}] SVG path not found in main page, checking iframes`);
+        }
 
-        // Click the element
-        await page.locator(`xpath=${xpath}`).click({ timeout: 5000 });
+        // Get all iframes on the page
+        const iframeElements = await page.locator('iframe').elementHandles();
+        console.log(`[${new Date().toISOString()}] Found ${iframeElements.length} iframes`);
 
-        console.log(`[${new Date().toISOString()}] Successfully clicked SVG path`);
-        return; // Exit the loop if click is successful
+        // Iterate through each iframe
+        for (let i = 0; i < iframeElements.length; i++) {
+          const iframe = iframeElements[i];
+          const frame = await iframe.contentFrame();
+          if (!frame) {
+            console.warn(`[${new Date().toISOString()}] Could not access content frame for iframe ${i}`);
+            continue;
+          }
+
+          try {
+            // Wait for the SVG path in the iframe
+            await frame.waitForSelector(`xpath=${xpath}`, { state: 'visible', timeout: 5000 });
+            await frame.locator(`xpath=${xpath}`).click({ timeout: 5000 });
+            console.log(`[${new Date().toISOString()}] Successfully clicked SVG path in iframe ${i}`);
+            return; // Exit if click is successful
+          } catch (iframeError) {
+            console.log(`[${new Date().toISOString()}] SVG path not found in iframe ${i}`);
+          }
+        }
+
+        // If no SVG path was found in the main page or any iframe, retry
+        console.warn(`[${new Date().toISOString()}] SVG path not found in attempt ${attempts}, retrying...`);
+        if (attempts >= maxAttempts) {
+          throw new Error(`Failed to click SVG path after ${maxAttempts} attempts`);
+        }
+        await page.waitForTimeout(retryInterval); // Wait before retrying
       } catch (error:any) {
         console.warn(`[${new Date().toISOString()}] Attempt ${attempts} failed:`, error.message);
         if (attempts >= maxAttempts) {
-          throw new Error(`Failed to click SVG path after ${maxAttempts} attempts`);
+          throw new Error(`Failed to click SVG path after ${maxAttempts} attempts: ${error.message}`);
         }
         await page.waitForTimeout(retryInterval); // Wait before retrying
       }
