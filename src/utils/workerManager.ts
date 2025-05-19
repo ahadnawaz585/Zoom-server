@@ -3,7 +3,7 @@ import { cpus, setPriority } from 'os';
 import { v4 as uuidv4 } from 'uuid';
 import { SystemMonitor } from './SystemMoniter';
 import { Task, WorkerResult } from '../types';
-import { workerScript } from '../utils/workerScript';
+import { workerScript } from './workerScript';
 
 export interface ActiveWorkerInfo {
   worker: Worker;

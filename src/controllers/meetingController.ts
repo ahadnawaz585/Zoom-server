@@ -49,8 +49,13 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
   const signature = await generateSignature(meetingId, 0, finalDuration);
 
   try {
-    await browserManager.launchBrowser({ maxMemoryMB: 512 + finalBots.length * 50 });
-    const botManager = new BotManager(browserManager);
+    // Initialize the browser first
+    await browserManager.launchBrowser();
+    
+    // Create and initialize BotManager
+    const botManager = new BotManager();
+    await botManager.launchBrowsers(); // Add this line to properly initialize browsers
+    
     const tabResults = await botManager.joinMeetingForBots(finalBots, meetingId, password, finalDuration, origin, signature);
 
     const tasks: Task[] = tabResults.map(result => ({
@@ -92,7 +97,6 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
     });
   }
 };
-
 export const getActiveWorkers = (req: Request, res: Response): void => {
   const activeWorkers = workerManager.getActiveWorkers();
   res.status(200).json({
