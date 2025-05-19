@@ -1,6 +1,6 @@
 // src/schedule/schedule.ts
 import schedule from 'node-schedule';
-import { getUpcomingMeetings } from '../lib/firebase/schedule';
+// import { getUpcomingMeetings } from '../lib/firebase/schedule';
 import { joinMeeting } from '../controllers/meetingController';
 import { JoinRequest } from '../types';
 
@@ -72,29 +72,29 @@ export default class MeetingScheduler {
   })
   .slice(0, 5);
 
-      let meetings = await getUpcomingMeetings(currentISTDate, currentISTTime);
+      // let meetings = await getUpcomingMeetings(currentISTDate, currentISTTime);
 
-      console.log(`Indian time: ${indianTime}`);
-      if (meetings.length > 0) {
-        // Deduplicate meetings by meetingId
-        const uniqueMeetingIds = new Set();
-        meetings = meetings.filter(meeting => {
-          if (uniqueMeetingIds.has(meeting.meetingId)) {
-            return false;
-          }
-          uniqueMeetingIds.add(meeting.meetingId);
-          return true;
-        });
+      // console.log(`Indian time: ${indianTime}`);
+      // if (meetings.length > 0) {
+      //   // Deduplicate meetings by meetingId
+      //   const uniqueMeetingIds = new Set();
+      //   meetings = meetings.filter(meeting => {
+      //     if (uniqueMeetingIds.has(meeting.meetingId)) {
+      //       return false;
+      //     }
+      //     uniqueMeetingIds.add(meeting.meetingId);
+      //     return true;
+      //   });
 
-        console.log(`Processing ${meetings.length} unique upcoming meetings at ${currentISTDate} ${currentISTTime}:`, meetings);
+      //   console.log(`Processing ${meetings.length} unique upcoming meetings at ${currentISTDate} ${currentISTTime}:`, meetings);
         
-        // Process each unique meeting
-        for (const meeting of meetings) {
-          await this.processMeeting(meeting);
-        }
-      } else {
-        console.log(`No meetings scheduled at ${currentISTDate} ${currentISTTime}`);
-      }
+      //   // Process each unique meeting
+      //   for (const meeting of meetings) {
+      //     await this.processMeeting(meeting);
+      //   }
+      // } else {
+      //   console.log(`No meetings scheduled at ${currentISTDate} ${currentISTTime}`);
+      // }
     } catch (error) {
       console.error('Error in scheduler job:', error);
     }
