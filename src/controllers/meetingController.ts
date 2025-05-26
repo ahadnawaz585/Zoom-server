@@ -9,7 +9,7 @@ import { BotManager } from '../utils/botManager';
 import { WorkerManager, ActiveWorkerInfo } from '../utils/workerManager';
 
 const globalActiveWorkers = new Map<string, ActiveWorkerInfo>();
-const browserManager = new BrowserManager();
+const browserManager = BrowserManager.getInstance(); // Use singleton instance
 const systemMonitor = new SystemMonitor();
 const workerManager = new WorkerManager(systemMonitor);
 
@@ -54,7 +54,7 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
     
     // Create and initialize BotManager
     const botManager = new BotManager();
-    await botManager.launchBrowsers(); // Add this line to properly initialize browsers
+    await botManager.launchBrowsers(); // Initialize browsers
     
     const tabResults = await botManager.joinMeetingForBots(finalBots, meetingId, password, finalDuration, origin, signature);
 
@@ -97,6 +97,7 @@ export const joinMeeting = async (req: Request, res: Response): Promise<void> =>
     });
   }
 };
+
 export const getActiveWorkers = (req: Request, res: Response): void => {
   const activeWorkers = workerManager.getActiveWorkers();
   res.status(200).json({
