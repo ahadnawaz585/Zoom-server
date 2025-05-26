@@ -2,11 +2,11 @@ import { KJUR } from 'jsrsasign';
 
 const signatureCache = new Map<string, { signature: string; expires: number }>();
 
-export  const generateSignature = async(
+export const generateSignature = (
   meetingNumber: string,
   role: number = 0,
   duration: number = 60 
-): Promise<string> => {
+): string => {
   console.log(`[${new Date().toISOString()}] Generating signature for meeting ${meetingNumber}`);
   const cacheKey = `${meetingNumber}-${role}-${duration}`;
   const now = Date.now() / 1000;
@@ -34,8 +34,8 @@ export  const generateSignature = async(
     tokenExp: exp,
   };
 
-  const signature = await KJUR.jws.JWS.sign('HS256', JSON.stringify(header), JSON.stringify(payload), NEXT_PUBLIC_ZOOM_MEETING_SDK_SECRET);
+  const signature = KJUR.jws.JWS.sign('HS256', JSON.stringify(header), JSON.stringify(payload), NEXT_PUBLIC_ZOOM_MEETING_SDK_SECRET);
   signatureCache.set(cacheKey, { signature, expires: exp });
-  console.log(`[${new Date().toISOString()}] New signature : ${signature} generated for ${meetingNumber} with expiry in ${duration} minutes`);
+  console.log(`[${new Date().toISOString()}] New signature generated for ${meetingNumber} with expiry in ${duration} minutes`);
   return signature;
 };

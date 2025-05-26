@@ -250,8 +250,8 @@ export default class BrowserManager {
 
     try {
       await page.waitForTimeout(15000);
-      await this.handleInitialDialogs(page, tabId);
-      await this.clickAudioButton(page, tabId, 5);
+      // await this.handleInitialDialogs(page, tabId);
+      // await this.clickAudioButton(page, tabId, 5);
     } catch (error) {
       console.error(`[${new Date().toISOString()}] Error during Zoom setup:`, error);
     }
