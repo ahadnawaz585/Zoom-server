@@ -8,18 +8,45 @@ export const workerScript = `
   const duration = workerData.duration || 60 * 60 * 1000;
   let browserManager = null;
 
-  // Performance optimization settings
+  // Enhanced performance optimization settings
   const PERFORMANCE_SETTINGS = {
-    BATCH_SIZE: 15, // Increased batch size for faster processing
-    BATCH_DELAY: 300, // Reduced delay between batches
-    VIDEO_CHECK_INTERVAL: 3000, // More frequent video checks
-    MAX_RETRIES: 3, // Number of retries for failed operations
-    MEMORY_OPTIMIZATION_INTERVAL: 60000, // Memory optimization every minute
+    BATCH_SIZE: 10,
+    BATCH_DELAY: 200, // Reduced delay for faster processing
+    VIDEO_CHECK_INTERVAL: 2000, // More frequent video checks
+    MEMORY_OPTIMIZATION_INTERVAL: 30000, // More frequent memory optimization
+    PAGE_LOAD_TIMEOUT: 30000,
+    MAX_CONCURRENT_TABS: 20,
+    RESOURCE_BLOCK_LIST: [
+      'image',
+      'media',
+      'font',
+      'stylesheet',
+      'script',
+      'texttrack',
+      'xhr',
+      'fetch',
+      'eventsource',
+      'websocket',
+      'manifest',
+      'other'
+    ],
+    VIEWPORT: {
+      width: 640,
+      height: 480,
+      deviceScaleFactor: 1,
+      isMobile: true,
+      hasTouch: false
+    }
   };
+
+  // Generate usernames for bots
+  function generateUsernames(count) {
+    return Array.from({ length: count }, (_, i) => \`name\${i + 1}\`);
+  }
 
   parentPort.on('message', async (message) => {
     if (message.type === 'TERMINATE') {
-      console.log(\`[${new Date().toISOString()}] Terminating worker\`);
+      console.log(\`[${new Date().toISOString()}] Terminating\`);
       await cleanup('Parent requested termination');
     }
   });
@@ -27,7 +54,7 @@ export const workerScript = `
   if (systemInfo.highPriority) {
     try {
       setPriority(19);
-      console.log(\`[${new Date().toISOString()}] Worker set to high priority\`);
+      console.log(\`[${new Date().toISOString()}] Set to high priority\`);
     } catch (error) {
       console.warn(\`[${new Date().toISOString()}] Failed to set priority: \${error}\`);
     }
@@ -49,6 +76,17 @@ export const workerScript = `
 
   async function setupPerformanceOptimizations(page) {
     try {
+      // Block unnecessary resources
+      await page.route('**/*', (route) => {
+        const resourceType = route.request().resourceType();
+        if (PERFORMANCE_SETTINGS.RESOURCE_BLOCK_LIST.includes(resourceType)) {
+          route.abort();
+        } else {
+          route.continue();
+        }
+      });
+
+      // Set up performance monitoring
       await page.evaluate(() => {
         // Disable unnecessary features
         window.performance.setResourceTimingBufferSize(0);
@@ -56,7 +94,7 @@ export const workerScript = `
         // Optimize memory usage
         if (window.gc) window.gc();
         
-        // Disable animations
+        // Disable animations and transitions
         document.body.style.setProperty('animation', 'none', 'important');
         document.body.style.setProperty('transition', 'none', 'important');
         
@@ -68,6 +106,8 @@ export const workerScript = `
             video.style.transform = 'translateZ(0)';
             video.style.backfaceVisibility = 'hidden';
             video.style.perspective = '1000px';
+            video.style.willChange = 'transform';
+            video.style.contain = 'layout style paint';
           }
         };
 
@@ -89,6 +129,24 @@ export const workerScript = `
           childList: true,
           subtree: true
         });
+
+        // Optimize rendering performance
+        document.body.style.setProperty('will-change', 'transform', 'important');
+        document.body.style.setProperty('contain', 'layout style paint', 'important');
+      });
+
+      // Set up performance monitoring
+      await page.evaluateOnNewDocument(() => {
+        const originalFetch = window.fetch;
+        window.fetch = async (...args) => {
+          const start = performance.now();
+          const response = await originalFetch(...args);
+          const duration = performance.now() - start;
+          if (duration > 1000) {
+            console.warn(\`Slow fetch request: \${duration}ms\`, args[0]);
+          }
+          return response;
+        };
       });
     } catch (error) {
       console.warn(\`[${new Date().toISOString()}] Performance optimization failed: \${error}\`);
@@ -97,24 +155,23 @@ export const workerScript = `
 
   async function ensureVideoStability(page) {
     try {
-      await page.waitForSelector('video', { timeout: 10000 });
+      await page.waitForSelector('video', { timeout: PERFORMANCE_SETTINGS.PAGE_LOAD_TIMEOUT });
       
       await page.evaluate(() => {
         const observer = new MutationObserver((mutations) => {
           const video = document.querySelector('video');
           if (video) {
-            // Ensure video is playing
             if (video.paused) {
               video.play().catch(() => {});
             }
-            // Set video quality to low for better performance
             if (video.videoWidth > 640) {
               video.style.width = '640px';
               video.style.height = 'auto';
             }
-            // Force hardware acceleration
             video.style.transform = 'translateZ(0)';
             video.style.backfaceVisibility = 'hidden';
+            video.style.willChange = 'transform';
+            video.style.contain = 'layout style paint';
           }
         });
 
@@ -128,7 +185,6 @@ export const workerScript = `
         }
       });
 
-      // Set up periodic video stability check with retry mechanism
       setInterval(async () => {
         try {
           await page.evaluate(() => {
@@ -141,9 +197,10 @@ export const workerScript = `
                 video.style.width = '640px';
                 video.style.height = 'auto';
               }
-              // Force hardware acceleration
               video.style.transform = 'translateZ(0)';
               video.style.backfaceVisibility = 'hidden';
+              video.style.willChange = 'transform';
+              video.style.contain = 'layout style paint';
             }
           });
         } catch (error) {
@@ -155,83 +212,63 @@ export const workerScript = `
     }
   }
 
-  async function openTabsInParallel(browserInstance, bots, lowResolution) {
-    const results = [];
-    
-    for (let i = 0; i < bots.length; i += PERFORMANCE_SETTINGS.BATCH_SIZE) {
-      const batch = bots.slice(i, i + PERFORMANCE_SETTINGS.BATCH_SIZE);
-      const batchPromises = batch.map(async (bot) => {
-        let retries = 0;
-        while (retries < PERFORMANCE_SETTINGS.MAX_RETRIES) {
-          try {
-            const page = await browserManager.addTab(browserInstance);
-            
-            // Configure page settings for better performance
-            await page.setViewport({
-              width: lowResolution ? 640 : 1024,
-              height: lowResolution ? 480 : 720,
-              deviceScaleFactor: 1
-            });
-
-            // Apply performance optimizations
-            await setupPerformanceOptimizations(page);
-            
-            // Join meeting logic here
-            // ... (existing meeting join code)
-            
-            // Set up video stability
-            await ensureVideoStability(page);
-            
-            return {
-              success: true,
-              botId: bot.id,
-              browser: 'chromium',
-              keepOpenOnTimeout: true,
-              scheduledTermination: new Date(Date.now() + duration).toISOString()
-            };
-          } catch (error) {
-            retries++;
-            if (retries === PERFORMANCE_SETTINGS.MAX_RETRIES) {
-              return {
-                success: false,
-                botId: bot.id,
-                error: \`Processing error after \${PERFORMANCE_SETTINGS.MAX_RETRIES} retries: \${error.message}\`,
-                browser: 'chromium'
-              };
-            }
-            await new Promise(resolve => setTimeout(resolve, 1000 * retries));
-          }
-        }
-      });
-
-      const batchResults = await Promise.all(batchPromises);
-      results.push(...batchResults);
-      
-      // Reduced delay between batches
-      await new Promise(resolve => setTimeout(resolve, PERFORMANCE_SETTINGS.BATCH_DELAY));
-    }
-
-    return results;
-  }
-
-  async function joinMeetingPair({ botPair, origin, optimizedJoin, disableVideo, disableAudio, lowResolution }) {
-    console.log(\`[${new Date().toISOString()}] Worker processing \${botPair.length} bots\`);
+  async function openMeetingTabs(meetings) {
+    console.log(\`[${new Date().toISOString()}] Opening tabs for \${meetings.length} meetings\`);
     const results = [];
     
     browserManager = BrowserManager.getInstance();
     
     // Set up periodic memory optimization
-    const memoryOptimizationInterval = setInterval(optimizeMemory, PERFORMANCE_SETTINGS.MEMORY_OPTIMIZATION_INTERVAL);
+    const memoryOptimizationInterval = setInterval(optimizeMemory, 
+      PERFORMANCE_SETTINGS.MEMORY_OPTIMIZATION_INTERVAL);
     
     try {
-      // Process bots in batches of 20 (max tabs per browser)
-      for (let i = 0; i < botPair.length; i += 20) {
-        const batch = botPair.slice(i, i + 20);
+      for (const meeting of meetings) {
+        const usernames = generateUsernames(10);
         const browserInstance = await browserManager.getAvailableBrowser();
         
-        // Open tabs in parallel for better performance
-        const batchResults = await openTabsInParallel(browserInstance, batch, lowResolution);
-        results.push(...batchResults);
+        // Open all tabs for this meeting simultaneously
+        const tabPromises = usernames.map(async (username) => {
+          try {
+            const page = await browserManager.addTab(browserInstance);
+            
+            // Apply viewport settings
+            await page.setViewport(PERFORMANCE_SETTINGS.VIEWPORT);
+
+            // Apply performance optimizations
+            await setupPerformanceOptimizations(page);
+            await ensureVideoStability(page);
+
+            // Set username in the page
+            await page.evaluate((name) => {
+              const nameInput = document.querySelector('input[type="text"]');
+              if (nameInput) {
+                nameInput.value = name;
+                nameInput.dispatchEvent(new Event('input', { bubbles: true }));
+              }
+            }, username);
+            
+            return {
+              success: true,
+              meetingId: meeting.id,
+              username,
+              browser: 'chromium',
+              keepOpenOnTimeout: true,
+              scheduledTermination: new Date(Date.now() + duration).toISOString()
+            };
+          } catch (error) {
+            return {
+              success: false,
+              meetingId: meeting.id,
+              username,
+              error: \`Processing error: \${error.message}\`,
+              browser: 'chromium'
+            };
+          }
+        });
+
+        const meetingResults = await Promise.all(tabPromises);
+        results.push(...meetingResults);
         
         optimizeMemory();
       }
@@ -242,17 +279,29 @@ export const workerScript = `
     return results;
   }
 
+  // Handle process termination
+  process.on('SIGTERM', () => cleanup('SIGTERM received'));
+  process.on('SIGINT', () => cleanup('SIGINT received'));
+  process.on('uncaughtException', (error) => {
+    console.error(\`[${new Date().toISOString()}] Uncaught exception: \${error}\`);
+    cleanup('Uncaught exception');
+  });
+
+  // Start processing meetings
   Promise.resolve()
-    .then(() => joinMeetingPair(workerData))
+    .then(() => openMeetingTabs(workerData.meetings))
     .then(result => parentPort.postMessage(result))
     .catch(error => {
-      console.error(\`[${new Date().toISOString()}] Worker error: \${error}\`);
+      console.error(\`[${new Date().toISOString()}] Error: \${error}\`);
       cleanup('Fatal error');
-      parentPort.postMessage(workerData.botPair.map(bot => ({
-        success: false,
-        botId: bot.id,
-        error: \`Worker error: \${error.message}\`,
-        browser: 'chromium'
-      })));
+      parentPort.postMessage(workerData.meetings.flatMap(meeting => 
+        generateUsernames(10).map(username => ({
+          success: false,
+          meetingId: meeting.id,
+          username,
+          error: \`Worker error: \${error.message}\`,
+          browser: 'chromium'
+        }))
+      ));
     });
 `;
