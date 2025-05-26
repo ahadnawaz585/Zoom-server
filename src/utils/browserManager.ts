@@ -18,14 +18,26 @@ interface BrowserDetails {
   tabs: TabInfo[];
 }
 
+interface BrowserInstance {
+  id: string;
+  browser: Browser;
+  tabs: Page[];
+  lastUsed: Date;
+  isActive: boolean;
+}
+
 export default class BrowserManager {
+  private static instance: BrowserManager;
+  private browsers: Map<string, BrowserInstance> = new Map();
+  private readonly MAX_TABS_PER_BROWSER = 20;
+  private readonly MAX_BROWSERS = 5;
   private browser: Browser | null = null;
   private context: BrowserContext | null = null;
   private pages: Map<string, Page> = new Map();
   private details: BrowserDetails;
   private detailsFilePath: string = `./browser_details_${uuidv4()}.json`;
 
-  constructor() {
+  private constructor() {
     this.details = {
       browserId: uuidv4(),
       launchTime: new Date(),
@@ -33,6 +45,13 @@ export default class BrowserManager {
       tabCount: 0,
       tabs: [],
     };
+  }
+
+  static getInstance(): BrowserManager {
+    if (!BrowserManager.instance) {
+      BrowserManager.instance = new BrowserManager();
+    }
+    return BrowserManager.instance;
   }
 
   async launchBrowser(): Promise<void> {
@@ -355,5 +374,90 @@ export default class BrowserManager {
       this.detailsFilePath,
       JSON.stringify(this.details, null, 2)
     );
+  }
+
+  async createBrowserInstance(): Promise<BrowserInstance> {
+    if (this.browsers.size >= this.MAX_BROWSERS) {
+      throw new Error('Maximum number of browser instances reached');
+    }
+
+    await this.launchBrowser();
+    if (!this.browser) {
+      throw new Error('Failed to launch browser');
+    }
+
+    const instance: BrowserInstance = {
+      id: uuidv4(),
+      browser: this.browser,
+      tabs: [],
+      lastUsed: new Date(),
+      isActive: true
+    };
+
+    this.browsers.set(instance.id, instance);
+    return instance;
+  }
+
+  async getAvailableBrowser(): Promise<BrowserInstance> {
+    // Find a browser with available tabs
+    for (const [_, instance] of this.browsers) {
+      if (instance.tabs.length < this.MAX_TABS_PER_BROWSER && instance.isActive) {
+        instance.lastUsed = new Date();
+        return instance;
+      }
+    }
+
+    // If no browser has available tabs, create a new one
+    return this.createBrowserInstance();
+  }
+
+  async addTab(browserInstance: BrowserInstance): Promise<Page> {
+    if (browserInstance.tabs.length >= this.MAX_TABS_PER_BROWSER) {
+      throw new Error('Maximum tabs reached for this browser instance');
+    }
+
+    const page = await browserInstance.browser.newPage();
+    browserInstance.tabs.push(page);
+    browserInstance.lastUsed = new Date();
+    return page;
+  }
+
+  async closeBrowserTab(browserInstance: BrowserInstance, page: Page): Promise<void> {
+    const index = browserInstance.tabs.indexOf(page);
+    if (index > -1) {
+      await page.close();
+      browserInstance.tabs.splice(index, 1);
+    }
+  }
+
+  async cleanupInactiveBrowsers(): Promise<void> {
+    const now = new Date();
+    const inactiveThreshold = 30 * 60 * 1000; // 30 minutes
+
+    for (const [id, instance] of this.browsers) {
+      if (now.getTime() - instance.lastUsed.getTime() > inactiveThreshold) {
+        await this.closeBrowserInstance(id);
+      }
+    }
+  }
+
+  private async closeBrowserInstance(id: string): Promise<void> {
+    const instance = this.browsers.get(id);
+    if (instance) {
+      await instance.browser.close();
+      this.browsers.delete(id);
+    }
+  }
+
+  getBrowserStats(): { totalBrowsers: number; totalTabs: number } {
+    let totalTabs = 0;
+    this.browsers.forEach(instance => {
+      totalTabs += instance.tabs.length;
+    });
+
+    return {
+      totalBrowsers: this.browsers.size,
+      totalTabs
+    };
   }
 }

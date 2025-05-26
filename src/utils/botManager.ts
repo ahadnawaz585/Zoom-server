@@ -32,7 +32,7 @@ export class BotManager {
 
     // Initialize browser instances if needed
     while (this.browserManagers.length < requiredBrowsers) {
-      this.browserManagers.push(new BrowserManager());
+      this.browserManagers.push(BrowserManager.getInstance());
     }
 
     // Launch only the required browser instances

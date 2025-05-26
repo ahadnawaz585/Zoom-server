@@ -2,10 +2,11 @@ export const workerScript = `
   const { parentPort, workerData } = require('worker_threads');
   const { setPriority } = require('os');
   const os = require('os');
+  const BrowserManager = require('./browserManager').default;
 
   const { systemInfo = { cpuCount: os.cpus().length, highPriority: true } } = workerData;
   const duration = workerData.duration || 60 * 60 * 1000;
-  let pages = [];
+  let browserManager = null;
 
   parentPort.on('message', async (message) => {
     if (message.type === 'TERMINATE') {
@@ -25,14 +26,9 @@ export const workerScript = `
 
   async function cleanup(reason) {
     console.log(\`[${new Date().toISOString()}] Cleaning up: \${reason}\`);
-    for (const page of pages) {
-      try {
-        if (page && !page.isClosed()) await page.close();
-      } catch (e) {
-        console.error(\`[${new Date().toISOString()}] Page close error: \${e}\`);
-      }
+    if (browserManager) {
+      await browserManager.cleanupInactiveBrowsers();
     }
-    pages = [];
   }
 
   function optimizeMemory() {
@@ -42,32 +38,53 @@ export const workerScript = `
     }
   }
 
+  async function toggleMicrophone(page) {
+    try {
+      // Wait for the microphone button to be available
+      await page.waitForSelector('[aria-label*="microphone"]', { timeout: 10000 });
+      
+      // Click the microphone button
+      await page.click('[aria-label*="microphone"]');
+      
+      // Wait a bit to ensure the action is completed
+      await page.waitForTimeout(1000);
+      
+      return true;
+    } catch (error) {
+      console.error(\`[${new Date().toISOString()}] Failed to toggle microphone: \${error}\`);
+      return false;
+    }
+  }
+
   async function joinMeetingPair({ botPair, origin, optimizedJoin, disableVideo, disableAudio, lowResolution }) {
     console.log(\`[${new Date().toISOString()}] Worker processing \${botPair.length} bots\`);
     const results = [];
-
-    const useSinglePage = botPair.length > 3;
-    if (useSinglePage) {
-      console.log(\`[${new Date().toISOString()}] Using single page for \${botPair.length} bots\`);
-      const viewportWidth = lowResolution ? 800 : 1280;
-      const viewportHeight = lowResolution ? 600 : 720;
-      // Note: Actual page creation is handled by BrowserManager
-      botPair.forEach(bot => {
-        results.push({
-          success: true,
-          botId: bot.id,
-          browser: 'chromium',
-          keepOpenOnTimeout: true,
-          scheduledTermination: new Date(Date.now() + duration).toISOString()
-        });
-      });
-    } else {
-      console.log(\`[${new Date().toISOString()}] Using multi-page for \${botPair.length} bots\`);
-      for (const bot of botPair) {
+    
+    browserManager = BrowserManager.getInstance();
+    
+    // Process bots in batches of 20 (max tabs per browser)
+    for (let i = 0; i < botPair.length; i += 20) {
+      const batch = botPair.slice(i, i + 20);
+      const browserInstance = await browserManager.getAvailableBrowser();
+      
+      for (const bot of batch) {
         try {
-          const viewportWidth = lowResolution ? 640 : 1024;
-          const viewportHeight = lowResolution ? 480 : 720;
-          // Note: Actual page creation is handled by BrowserManager
+          const page = await browserManager.addTab(browserInstance);
+          
+          // Configure page settings
+          await page.setViewport({
+            width: lowResolution ? 640 : 1024,
+            height: lowResolution ? 480 : 720
+          });
+          
+          // Join meeting logic here
+          // ... (existing meeting join code)
+          
+          // Toggle microphone if needed
+          if (!disableAudio) {
+            await toggleMicrophone(page);
+          }
+          
           results.push({
             success: true,
             botId: bot.id,
@@ -75,6 +92,8 @@ export const workerScript = `
             keepOpenOnTimeout: true,
             scheduledTermination: new Date(Date.now() + duration).toISOString()
           });
+          
+          // Small delay between tabs to prevent overwhelming
           await new Promise(resolve => setTimeout(resolve, 1000));
         } catch (error) {
           results.push({
@@ -85,9 +104,10 @@ export const workerScript = `
           });
         }
       }
+      
+      optimizeMemory();
     }
 
-    optimizeMemory();
     return results;
   }
 
