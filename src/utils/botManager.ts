@@ -24,7 +24,7 @@ export class BotManager {
   ): Promise<{ tabId: string; botIds: string[] }[]> {
     console.log(`[${new Date().toISOString()}] Processing ${bots.length} bots for meeting ${meetingId}`);
     const results: { tabId: string; botIds: string[] }[] = [];
-    const maxBotsPerTab = 1; // Only 1 bot per tab for simplicity
+    const maxBotsPerTab = 20; // Only 1 bot per tab for simplicity
 
     // Calculate required browser instances
     const requiredBrowsers = Math.ceil(bots.length / this.maxTabsPerBrowser);
@@ -52,7 +52,7 @@ export class BotManager {
       const usernames = batch.map(bot => encodeURIComponent(bot.name)).join(',');
 
       // Construct optimized URL
-      let url = `${origin}/meeting?username=${usernames}&meetingId=${encodeURIComponent(meetingId)}&password=${encodeURIComponent(password)}&signature=${encodeURIComponent(signature)}`;
+      let url = `${origin}/meetings?usernames=${usernames}&meetingId=${encodeURIComponent(meetingId)}&password=${encodeURIComponent(password)}&signature=${encodeURIComponent(signature)}`;
       url += '&optimized=true&noVideo=true&noAudio=true&forceMute=true&lowRes=true&minimalUI=true';
 
       console.log(`[${new Date().toISOString()}] Opening tab for ${batch.length} bots with URL: ${url}`);
